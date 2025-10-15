@@ -4,14 +4,24 @@
  * URL: http://localhost/api-percetakan/products.php
  */
 
-error_reporting(0);
+// AKTIFKAN ERROR REPORTING UNTUK DEBUG
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 require_once '../config/database.php';
 require_once '../helpers/Response.php';
 
-// CORS
+// CORS - FIXED
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, Cache-Control');
+header('Content-Type: application/json');
+
+// Handle preflight request
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
 
 // Koneksi database
 $database = new Database();
@@ -80,10 +90,11 @@ function getAll($db) {
 // GET BY CATEGORY - Produk per kategori
 // ============================================
 function byCategory($db) {
-    $id_category = $db->escape($_GET['id_category'] ?? '');
+    $id_category = $db->real_escape_string($_GET['id_category'] ?? '');
     
     if (empty($id_category)) {
         Response::error('ID kategori tidak ditemukan', 400);
+        return;
     }
     
     $sql = "SELECT p.*, c.nama_category 
@@ -118,18 +129,23 @@ function byCategory($db) {
 // CREATE - Tambah produk baru
 // ============================================
 function create($db) {
-    $id_category = $db->escape($_POST['id_category'] ?? '');
-    $nama_product = $db->escape($_POST['nama_product'] ?? '');
-    $deskripsi = $db->escape($_POST['deskripsi'] ?? '');
-    $media_cetak = $db->escape($_POST['media_cetak'] ?? '');
-    $ukuran_standar = $db->escape($_POST['ukuran_standar'] ?? '');
-    $satuan = $db->escape($_POST['satuan'] ?? 'lembar');
-    $harga_dasar = $db->escape($_POST['harga_dasar'] ?? 0);
-    $gambar_preview = $db->escape($_POST['gambar_preview'] ?? '');
+    // Log untuk debug
+    error_log("CREATE FUNCTION CALLED");
+    error_log("POST DATA: " . print_r($_POST, true));
+    
+    $id_category = $db->real_escape_string($_POST['id_category'] ?? '');
+    $nama_product = $db->real_escape_string($_POST['nama_product'] ?? '');
+    $deskripsi = $db->real_escape_string($_POST['deskripsi'] ?? '');
+    $media_cetak = $db->real_escape_string($_POST['media_cetak'] ?? '');
+    $ukuran_standar = $db->real_escape_string($_POST['ukuran_standar'] ?? '');
+    $satuan = $db->real_escape_string($_POST['satuan'] ?? 'lembar');
+    $harga_dasar = $db->real_escape_string($_POST['harga_dasar'] ?? 0);
+    $gambar_preview = $db->real_escape_string($_POST['gambar_preview'] ?? '');
     
     // Validasi
     if (empty($id_category) || empty($nama_product)) {
         Response::error('ID kategori dan nama produk wajib diisi', 400);
+        return;
     }
     
     // Cek kategori ada
@@ -137,29 +153,36 @@ function create($db) {
     $resultCat = $db->query($checkCat);
     if ($resultCat->num_rows === 0) {
         Response::error('Kategori tidak ditemukan', 400);
+        return;
     }
     
     // Insert
     $sql = "INSERT INTO products (id_category, nama_product, deskripsi, media_cetak, ukuran_standar, satuan, harga_dasar, gambar_preview, status_aktif) 
             VALUES ('$id_category', '$nama_product', '$deskripsi', '$media_cetak', '$ukuran_standar', '$satuan', '$harga_dasar', '$gambar_preview', 1)";
     
-    $db->query($sql);
-    $insertId = $db->lastInsertId();
+    error_log("SQL: " . $sql);
     
-    Response::created([
-        'id_product' => $insertId,
-        'nama_product' => $nama_product
-    ], 'Produk berhasil ditambahkan');
+    if ($db->query($sql)) {
+        $insertId = $db->insert_id;
+        
+        Response::success([
+            'id_product' => $insertId,
+            'nama_product' => $nama_product
+        ], 'Produk berhasil ditambahkan');
+    } else {
+        Response::error('Gagal menyimpan produk: ' . $db->error, 500);
+    }
 }
 
 // ============================================
 // DETAIL - Detail produk
 // ============================================
 function detail($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = $db->real_escape_string($_GET['id'] ?? '');
     
     if (empty($id)) {
         Response::error('ID produk tidak ditemukan', 400);
+        return;
     }
     
     $sql = "SELECT p.*, c.nama_category 
@@ -171,6 +194,7 @@ function detail($db) {
     
     if ($result->num_rows === 0) {
         Response::notFound('Produk tidak ditemukan');
+        return;
     }
     
     $row = $result->fetch_assoc();
@@ -196,10 +220,15 @@ function detail($db) {
 // UPDATE - Update produk
 // ============================================
 function update($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    error_log("UPDATE FUNCTION CALLED");
+    error_log("GET ID: " . ($_GET['id'] ?? 'NONE'));
+    error_log("POST DATA: " . print_r($_POST, true));
+    
+    $id = $db->real_escape_string($_GET['id'] ?? '');
     
     if (empty($id)) {
         Response::error('ID produk tidak ditemukan', 400);
+        return;
     }
     
     // Cek produk ada
@@ -207,48 +236,49 @@ function update($db) {
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Produk tidak ditemukan');
+        return;
     }
     
     // Build update query
     $updates = [];
     
     if (isset($_POST['id_category'])) {
-        $id_category = $db->escape($_POST['id_category']);
+        $id_category = $db->real_escape_string($_POST['id_category']);
         $updates[] = "id_category = '$id_category'";
     }
     
     if (isset($_POST['nama_product'])) {
-        $nama_product = $db->escape($_POST['nama_product']);
+        $nama_product = $db->real_escape_string($_POST['nama_product']);
         $updates[] = "nama_product = '$nama_product'";
     }
     
     if (isset($_POST['deskripsi'])) {
-        $deskripsi = $db->escape($_POST['deskripsi']);
+        $deskripsi = $db->real_escape_string($_POST['deskripsi']);
         $updates[] = "deskripsi = '$deskripsi'";
     }
     
     if (isset($_POST['media_cetak'])) {
-        $media_cetak = $db->escape($_POST['media_cetak']);
+        $media_cetak = $db->real_escape_string($_POST['media_cetak']);
         $updates[] = "media_cetak = '$media_cetak'";
     }
     
     if (isset($_POST['ukuran_standar'])) {
-        $ukuran_standar = $db->escape($_POST['ukuran_standar']);
+        $ukuran_standar = $db->real_escape_string($_POST['ukuran_standar']);
         $updates[] = "ukuran_standar = '$ukuran_standar'";
     }
     
     if (isset($_POST['satuan'])) {
-        $satuan = $db->escape($_POST['satuan']);
+        $satuan = $db->real_escape_string($_POST['satuan']);
         $updates[] = "satuan = '$satuan'";
     }
     
     if (isset($_POST['harga_dasar'])) {
-        $harga_dasar = $db->escape($_POST['harga_dasar']);
+        $harga_dasar = $db->real_escape_string($_POST['harga_dasar']);
         $updates[] = "harga_dasar = '$harga_dasar'";
     }
     
     if (isset($_POST['gambar_preview'])) {
-        $gambar_preview = $db->escape($_POST['gambar_preview']);
+        $gambar_preview = $db->real_escape_string($_POST['gambar_preview']);
         $updates[] = "gambar_preview = '$gambar_preview'";
     }
     
@@ -259,22 +289,28 @@ function update($db) {
     
     if (empty($updates)) {
         Response::error('Tidak ada data yang diupdate', 400);
+        return;
     }
     
     $sql = "UPDATE products SET " . implode(', ', $updates) . " WHERE id_product = '$id'";
-    $db->query($sql);
+    error_log("UPDATE SQL: " . $sql);
     
-    Response::success(['id_product' => $id], 'Produk berhasil diupdate');
+    if ($db->query($sql)) {
+        Response::success(['id_product' => $id], 'Produk berhasil diupdate');
+    } else {
+        Response::error('Gagal update produk: ' . $db->error, 500);
+    }
 }
 
 // ============================================
-// DELETE - Hapus produk (soft delete)
+// DELETE - Hapus produk PERMANEN (HARD DELETE)
 // ============================================
 function delete($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = $db->real_escape_string($_GET['id'] ?? '');
     
     if (empty($id)) {
         Response::error('ID produk tidak ditemukan', 400);
+        return;
     }
     
     // Cek produk ada
@@ -282,12 +318,16 @@ function delete($db) {
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Produk tidak ditemukan');
+        return;
     }
     
-    // Soft delete
-    $sql = "UPDATE products SET status_aktif = 0 WHERE id_product = '$id'";
-    $db->query($sql);
+    // HARD DELETE - Hapus permanen dari database
+    $sql = "DELETE FROM products WHERE id_product = '$id'";
     
-    Response::success(['id_product' => $id], 'Produk berhasil dihapus');
+    if ($db->query($sql)) {
+        Response::success(['id_product' => $id], 'Produk berhasil dihapus permanen');
+    } else {
+        Response::error('Gagal menghapus produk: ' . $db->error, 500);
+    }
 }
 ?>

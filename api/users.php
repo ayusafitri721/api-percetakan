@@ -1,21 +1,31 @@
 <?php
 /**
  * API Users - CRUD Tabel users
- * URL: http://localhost/api-percetakan/users.php
+ * URL: http://localhost/api-percetakan/api/users.php
  */
 
-error_reporting(0);
+error_reporting(E_ALL);
+ini_set('display_errors', 1); // ✅ FIXED TYPO
+
 require_once '../config/database.php';
 require_once '../helpers/Response.php';
 
-// CORS
+// CORS - FIXED: Tambah header OPTIONS dan Content-Type
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Cache-Control, Pragma');
+header('Content-Type: application/json; charset=UTF-8');
+
+// Handle preflight request
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
 
 // Koneksi database
 $database = new Database();
-$db = $database->connect();
+$database->connect();
+$db = $database;
 
 // Get operation
 $op = $_GET['op'] ?? '';
@@ -42,8 +52,10 @@ switch ($op) {
 // GET ALL - Ambil semua user
 // ============================================
 function getAll($db) {
+    // Hanya tampilkan user yang aktif (status_aktif = 1)
     $sql = "SELECT id_user, nama, email, role, no_telepon, alamat, status_aktif, tanggal_daftar 
             FROM users 
+            WHERE status_aktif = 1
             ORDER BY id_user DESC";
     
     $result = $db->query($sql);
@@ -72,14 +84,15 @@ function getAll($db) {
 // CREATE - Tambah user baru
 // ============================================
 function create($db) {
-    $nama = $db->escape($_POST['nama'] ?? '');
-    $email = $db->escape($_POST['email'] ?? '');
+    // Ambil data tanpa escape dulu
+    $nama = trim($_POST['nama'] ?? '');
+    $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
-    $role = $db->escape($_POST['role'] ?? 'pelanggan');
-    $no_telepon = $db->escape($_POST['no_telepon'] ?? '');
-    $alamat = $db->escape($_POST['alamat'] ?? '');
+    $role = trim($_POST['role'] ?? 'pelanggan');
+    $no_telepon = trim($_POST['no_telepon'] ?? '');
+    $alamat = trim($_POST['alamat'] ?? '');
     
-    // Validasi
+    // Validasi - CEK DULU SEBELUM ESCAPE
     if (empty($nama) || empty($email) || empty($password)) {
         Response::error('Nama, email, dan password wajib diisi', 400);
     }
@@ -89,8 +102,15 @@ function create($db) {
         Response::error('Format email tidak valid', 400);
     }
     
+    // SEKARANG BARU ESCAPE SETELAH VALIDASI
+    $nama_escaped = $db->escape($nama);
+    $email_escaped = $db->escape($email);
+    $role_escaped = $db->escape($role);
+    $no_telepon_escaped = $db->escape($no_telepon);
+    $alamat_escaped = $db->escape($alamat);
+    
     // Cek email sudah ada
-    $checkSql = "SELECT id_user FROM users WHERE email = '$email'";
+    $checkSql = "SELECT id_user FROM users WHERE email = '$email_escaped'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows > 0) {
         Response::error('Email sudah terdaftar', 400);
@@ -101,9 +121,12 @@ function create($db) {
     
     // Insert
     $sql = "INSERT INTO users (nama, email, password_hash, role, no_telepon, alamat, status_aktif) 
-            VALUES ('$nama', '$email', '$password_hash', '$role', '$no_telepon', '$alamat', 1)";
+            VALUES ('$nama_escaped', '$email_escaped', '$password_hash', '$role_escaped', '$no_telepon_escaped', '$alamat_escaped', 1)";
     
-    $db->query($sql);
+    if (!$db->query($sql)) {
+        Response::error('Gagal menambahkan user ke database', 500);
+    }
+    
     $insertId = $db->lastInsertId();
     
     Response::created([
@@ -170,12 +193,12 @@ function update($db) {
     $updates = [];
     
     if (isset($_POST['nama'])) {
-        $nama = $db->escape($_POST['nama']);
+        $nama = $db->escape(trim($_POST['nama']));
         $updates[] = "nama = '$nama'";
     }
     
     if (isset($_POST['email'])) {
-        $email = $db->escape($_POST['email']);
+        $email = $db->escape(trim($_POST['email']));
         // Cek email sudah dipakai user lain
         $checkEmail = "SELECT id_user FROM users WHERE email = '$email' AND id_user != '$id'";
         $resultEmail = $db->query($checkEmail);
@@ -185,24 +208,24 @@ function update($db) {
         $updates[] = "email = '$email'";
     }
     
-    if (isset($_POST['password'])) {
+    if (isset($_POST['password']) && !empty($_POST['password'])) {
         $password = $_POST['password'];
         $password_hash = password_hash($password, PASSWORD_BCRYPT);
         $updates[] = "password_hash = '$password_hash'";
     }
     
     if (isset($_POST['role'])) {
-        $role = $db->escape($_POST['role']);
+        $role = $db->escape(trim($_POST['role']));
         $updates[] = "role = '$role'";
     }
     
     if (isset($_POST['no_telepon'])) {
-        $no_telepon = $db->escape($_POST['no_telepon']);
+        $no_telepon = $db->escape(trim($_POST['no_telepon']));
         $updates[] = "no_telepon = '$no_telepon'";
     }
     
     if (isset($_POST['alamat'])) {
-        $alamat = $db->escape($_POST['alamat']);
+        $alamat = $db->escape(trim($_POST['alamat']));
         $updates[] = "alamat = '$alamat'";
     }
     
@@ -216,13 +239,16 @@ function update($db) {
     }
     
     $sql = "UPDATE users SET " . implode(', ', $updates) . " WHERE id_user = '$id'";
-    $db->query($sql);
+    
+    if (!$db->query($sql)) {
+        Response::error('Gagal update user', 500);
+    }
     
     Response::success(['id_user' => $id], 'User berhasil diupdate');
 }
 
 // ============================================
-// DELETE - Hapus user (soft delete)
+// DELETE - Hapus user PERMANEN (hard delete)
 // ============================================
 function delete($db) {
     $id = $db->escape($_GET['id'] ?? '');
@@ -232,16 +258,35 @@ function delete($db) {
     }
     
     // Cek user ada
-    $checkSql = "SELECT id_user FROM users WHERE id_user = '$id'";
+    $checkSql = "SELECT id_user, nama FROM users WHERE id_user = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('User tidak ditemukan');
     }
     
-    // Soft delete (ubah status_aktif jadi 0)
-    $sql = "UPDATE users SET status_aktif = 0 WHERE id_user = '$id'";
-    $db->query($sql);
+    $user = $checkResult->fetch_assoc();
     
-    Response::success(['id_user' => $id], 'User berhasil dihapus');
+    // Log sebelum delete
+    error_log("Hard deleting user: ID=$id, Name={$user['nama']}");
+    
+    // HARD DELETE - Hapus permanen dari database
+    $sql = "DELETE FROM users WHERE id_user = '$id'";
+    
+    if (!$db->query($sql)) {
+        error_log("Delete failed: " . $db->error);
+        Response::error('Gagal menghapus user: ' . $db->error, 500);
+    }
+    
+    // Verifikasi user benar-benar terhapus
+    $verifySql = "SELECT COUNT(*) as count FROM users WHERE id_user = '$id'";
+    $verifyResult = $db->query($verifySql);
+    $verifyData = $verifyResult->fetch_assoc();
+    
+    if ($verifyData['count'] == 0) {
+        error_log("User successfully deleted from database");
+        Response::success(['id_user' => $id], 'User berhasil dihapus permanen dari database');
+    } else {
+        Response::error('User gagal dihapus', 500);
+    }
 }
 ?>
