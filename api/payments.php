@@ -1,17 +1,27 @@
 <?php
 /**
  * API Payments - CRUD Tabel payments
- * URL: http://localhost/api-percetakan/payments.php
+ * URL: http://localhost/api-percetakan/api/payments.php
+ * FIXED: real_escape_string & insert_id
  */
 
-error_reporting(0);
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 require_once '../config/database.php';
 require_once '../helpers/Response.php';
 
 // CORS
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE');
+header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
+header('Content-Type: application/json');
+
+// Handle preflight
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
 
 // Koneksi database
 $database = new Database();
@@ -92,10 +102,11 @@ function getAll($db) {
 // BY ORDER - Pembayaran per order
 // ============================================
 function byOrder($db) {
-    $id_order = $db->escape($_GET['id_order'] ?? '');
+    $id_order = $db->real_escape_string($_GET['id_order'] ?? '');
     
     if (empty($id_order)) {
         Response::error('ID order tidak ditemukan', 400);
+        return;
     }
     
     $sql = "SELECT * FROM payments 
@@ -164,13 +175,14 @@ function pendingPayments($db) {
 // CONFIRM - Konfirmasi pembayaran
 // ============================================
 function confirmPayment($db) {
-    $id = $db->escape($_POST['id_payment'] ?? '');
-    $status = $db->escape($_POST['status_pembayaran'] ?? '');
-    $id_admin = $db->escape($_POST['id_admin_konfirmasi'] ?? '');
-    $catatan = $db->escape($_POST['catatan'] ?? '');
+    $id = $db->real_escape_string($_POST['id_payment'] ?? '');
+    $status = $db->real_escape_string($_POST['status_pembayaran'] ?? '');
+    $id_admin = $db->real_escape_string($_POST['id_admin_konfirmasi'] ?? '');
+    $catatan = $db->real_escape_string($_POST['catatan'] ?? '');
     
     if (empty($id) || empty($status) || empty($id_admin)) {
         Response::error('ID payment, status, dan ID admin wajib diisi', 400);
+        return;
     }
     
     // Cek payment ada
@@ -178,6 +190,7 @@ function confirmPayment($db) {
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Payment tidak ditemukan');
+        return;
     }
     
     $id_order = $checkResult->fetch_assoc()['id_order'];
@@ -205,50 +218,95 @@ function confirmPayment($db) {
 }
 
 // ============================================
-// CREATE - Tambah pembayaran
+// CREATE - Tambah pembayaran (FIXED)
 // ============================================
 function create($db) {
-    $id_order = $db->escape($_POST['id_order'] ?? '');
-    $metode = $db->escape($_POST['metode_pembayaran'] ?? '');
-    $nama_bank = $db->escape($_POST['nama_bank'] ?? '');
-    $nomor_rekening = $db->escape($_POST['nomor_rekening'] ?? '');
-    $nama_pemilik = $db->escape($_POST['nama_pemilik'] ?? '');
-    $jumlah_bayar = $db->escape($_POST['jumlah_bayar'] ?? 0);
-    $bukti_bayar = $db->escape($_POST['bukti_bayar'] ?? '');
-    
-    // Validasi
-    if (empty($id_order) || empty($metode) || empty($jumlah_bayar)) {
-        Response::error('ID order, metode pembayaran, dan jumlah bayar wajib diisi', 400);
+    try {
+        error_log("=== CREATE PAYMENT CALLED ===");
+        error_log("POST data: " . print_r($_POST, true));
+        
+        $id_order = $db->real_escape_string($_POST['id_order'] ?? '');
+        $metode = $db->real_escape_string($_POST['metode_pembayaran'] ?? '');
+        $nama_bank = $db->real_escape_string($_POST['nama_bank'] ?? '');
+        $nomor_rekening = $db->real_escape_string($_POST['nomor_rekening'] ?? '');
+        $nama_pemilik = $db->real_escape_string($_POST['nama_pemilik'] ?? '');
+        $jumlah_bayar = floatval($_POST['jumlah_bayar'] ?? 0);
+        $bukti_bayar = $db->real_escape_string($_POST['bukti_bayar'] ?? '');
+        
+        // Validasi
+        if (empty($id_order) || empty($metode) || empty($jumlah_bayar)) {
+            error_log("ERROR: Validation failed - id_order: $id_order, metode: $metode, jumlah: $jumlah_bayar");
+            Response::error('ID order, metode pembayaran, dan jumlah bayar wajib diisi', 400);
+            return;
+        }
+        
+        // ✅ Validasi metode pembayaran sesuai enum
+        $valid_metode = ['transfer', 'qris', 'ewallet', 'cash', 'cod'];
+        if (!in_array($metode, $valid_metode)) {
+            error_log("ERROR: Invalid metode - $metode");
+            Response::error("Metode pembayaran tidak valid. Gunakan: " . implode(', ', $valid_metode), 400);
+            return;
+        }
+        
+        // Cek order ada
+        $checkOrder = "SELECT id_order FROM orders WHERE id_order = " . intval($id_order);
+        $resultOrder = $db->query($checkOrder);
+        if ($resultOrder->num_rows === 0) {
+            error_log("ERROR: Order not found");
+            Response::error('Order tidak ditemukan', 400);
+            return;
+        }
+        
+        // ✅ FIXED: Kasir offline langsung set status "diterima" (sudah bayar tunai)
+        $status_pembayaran = 'diterima'; // Offline = langsung lunas
+        
+        // Insert
+        $sql = "INSERT INTO payments (
+                    id_order, metode_pembayaran, nama_bank, nomor_rekening, 
+                    nama_pemilik, jumlah_bayar, bukti_bayar, status_pembayaran
+                ) VALUES (
+                    " . intval($id_order) . ",
+                    '$metode',
+                    '$nama_bank',
+                    '$nomor_rekening',
+                    '$nama_pemilik',
+                    $jumlah_bayar,
+                    '$bukti_bayar',
+                    '$status_pembayaran'
+                )";
+        
+        error_log("SQL: $sql");
+        
+        if (!$db->query($sql)) {
+            error_log("ERROR: Query failed - " . $db->error);
+            Response::error('Database error: ' . $db->error, 500);
+            return;
+        }
+        
+        $insertId = $db->insert_id; // ✅ FIXED
+        error_log("Payment created! ID: $insertId");
+        
+        Response::success([
+            'id_payment' => $insertId,
+            'id_order' => $id_order,
+            'status_pembayaran' => $status_pembayaran
+        ], 'Pembayaran berhasil dicatat');
+        
+    } catch (Exception $e) {
+        error_log("EXCEPTION: " . $e->getMessage());
+        Response::error('Server error: ' . $e->getMessage(), 500);
     }
-    
-    // Cek order ada
-    $checkOrder = "SELECT id_order FROM orders WHERE id_order = '$id_order'";
-    $resultOrder = $db->query($checkOrder);
-    if ($resultOrder->num_rows === 0) {
-        Response::error('Order tidak ditemukan', 400);
-    }
-    
-    // Insert
-    $sql = "INSERT INTO payments (id_order, metode_pembayaran, nama_bank, nomor_rekening, nama_pemilik, jumlah_bayar, bukti_bayar, status_pembayaran) 
-            VALUES ('$id_order', '$metode', '$nama_bank', '$nomor_rekening', '$nama_pemilik', '$jumlah_bayar', '$bukti_bayar', 'pending')";
-    
-    $db->query($sql);
-    $insertId = $db->lastInsertId();
-    
-    Response::created([
-        'id_payment' => $insertId,
-        'id_order' => $id_order
-    ], 'Pembayaran berhasil ditambahkan');
 }
 
 // ============================================
 // DETAIL - Detail pembayaran
 // ============================================
 function detail($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = $db->real_escape_string($_GET['id'] ?? '');
     
     if (empty($id)) {
         Response::error('ID payment tidak ditemukan', 400);
+        return;
     }
     
     $sql = "SELECT p.*, o.kode_order, o.total_harga, u.nama as nama_pelanggan,
@@ -263,6 +321,7 @@ function detail($db) {
     
     if ($result->num_rows === 0) {
         Response::notFound('Payment tidak ditemukan');
+        return;
     }
     
     $row = $result->fetch_assoc();
@@ -292,10 +351,11 @@ function detail($db) {
 // UPDATE - Update pembayaran
 // ============================================
 function update($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = $db->real_escape_string($_GET['id'] ?? '');
     
     if (empty($id)) {
         Response::error('ID payment tidak ditemukan', 400);
+        return;
     }
     
     // Cek payment ada
@@ -303,23 +363,25 @@ function update($db) {
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Payment tidak ditemukan');
+        return;
     }
     
     // Build update query
     $updates = [];
     
     if (isset($_POST['bukti_bayar'])) {
-        $bukti = $db->escape($_POST['bukti_bayar']);
+        $bukti = $db->real_escape_string($_POST['bukti_bayar']);
         $updates[] = "bukti_bayar = '$bukti'";
     }
     
     if (isset($_POST['catatan'])) {
-        $catatan = $db->escape($_POST['catatan']);
+        $catatan = $db->real_escape_string($_POST['catatan']);
         $updates[] = "catatan = '$catatan'";
     }
     
     if (empty($updates)) {
         Response::error('Tidak ada data yang diupdate', 400);
+        return;
     }
     
     $sql = "UPDATE payments SET " . implode(', ', $updates) . " WHERE id_payment = '$id'";
@@ -332,10 +394,11 @@ function update($db) {
 // DELETE - Hapus pembayaran
 // ============================================
 function delete($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = $db->real_escape_string($_GET['id'] ?? '');
     
     if (empty($id)) {
         Response::error('ID payment tidak ditemukan', 400);
+        return;
     }
     
     // Cek payment ada
@@ -343,6 +406,7 @@ function delete($db) {
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Payment tidak ditemukan');
+        return;
     }
     
     // Hard delete
