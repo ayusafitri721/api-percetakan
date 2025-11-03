@@ -2,7 +2,7 @@
 /**
  * API Orders - CRUD Tabel orders
  * URL: http://localhost/api-percetakan/api/orders.php
- * FIXED: Hapus status_pembayaran hardcoded, pakai status_order aja
+ * FIXED: Untuk Laporan & Statistik
  */
 
 // ENABLE ERROR REPORTING FOR DEBUGGING
@@ -54,27 +54,176 @@ switch ($op) {
     case 'update_status':
         updateStatus($db);
         break;
+    case 'statistics':
+        statistics($db);
+        break;
+    case 'sales_report':
+        salesReport($db);
+        break;
     default:
         getAll($db);
         break;
 }
 
 // ============================================
+// STATISTICS - Untuk Dashboard Laporan (BARU)
+// ============================================
+function statistics($db) {
+    $startDate = $_GET['start_date'] ?? '';
+    $endDate = $_GET['end_date'] ?? '';
+    
+    $whereDate = '';
+    if (!empty($startDate) && !empty($endDate)) {
+        $startDate = $db->real_escape_string($startDate);
+        $endDate = $db->real_escape_string($endDate);
+        $whereDate = "WHERE DATE(o.tanggal_order) BETWEEN '$startDate' AND '$endDate'";
+    } else {
+        // Default: bulan ini
+        $whereDate = "WHERE MONTH(o.tanggal_order) = MONTH(CURRENT_DATE()) 
+                      AND YEAR(o.tanggal_order) = YEAR(CURRENT_DATE())";
+    }
+    
+    // Total Penjualan
+    $totalSql = "SELECT 
+                    COALESCE(SUM(total_harga), 0) as total_penjualan,
+                    COUNT(*) as jumlah_transaksi
+                 FROM orders o
+                 $whereDate 
+                 AND status_order NOT IN ('dibatalkan', 'pending')";
+    
+    $totalResult = $db->query($totalSql);
+    $totalData = $totalResult->fetch_assoc();
+    
+    // Total Item Terjual
+    $itemSql = "SELECT COALESCE(SUM(oi.jumlah), 0) as total_item
+                FROM order_items oi
+                INNER JOIN orders o ON oi.id_order = o.id_order
+                $whereDate
+                AND o.status_order NOT IN ('dibatalkan', 'pending')";
+    
+    $itemResult = $db->query($itemSql);
+    $itemData = $itemResult->fetch_assoc();
+    
+    // Produk Terlaris
+    $topProductSql = "SELECT 
+                        p.nama_product,
+                        SUM(oi.jumlah) as total_terjual,
+                        SUM(oi.subtotal) as total_pendapatan
+                      FROM order_items oi
+                      INNER JOIN orders o ON oi.id_order = o.id_order
+                      INNER JOIN products p ON oi.id_product = p.id_product
+                      $whereDate
+                      AND o.status_order NOT IN ('dibatalkan', 'pending')
+                      GROUP BY oi.id_product
+                      ORDER BY total_terjual DESC
+                      LIMIT 5";
+    
+    $topProductResult = $db->query($topProductSql);
+    $topProducts = [];
+    while ($row = $topProductResult->fetch_assoc()) {
+        $topProducts[] = $row;
+    }
+    
+    Response::success([
+        'total_penjualan' => floatval($totalData['total_penjualan']),
+        'jumlah_transaksi' => intval($totalData['jumlah_transaksi']),
+        'total_item' => intval($itemData['total_item']),
+        'produk_terlaris' => $topProducts,
+        'periode' => [
+            'start_date' => $startDate ?: date('Y-m-01'),
+            'end_date' => $endDate ?: date('Y-m-d')
+        ]
+    ]);
+}
+
+// ============================================
+// SALES REPORT - Laporan Penjualan Detail (BARU)
+// ============================================
+function salesReport($db) {
+    $startDate = $_GET['start_date'] ?? '';
+    $endDate = $_GET['end_date'] ?? '';
+    
+    $whereDate = '';
+    if (!empty($startDate) && !empty($endDate)) {
+        $startDate = $db->real_escape_string($startDate);
+        $endDate = $db->real_escape_string($endDate);
+        $whereDate = "AND DATE(o.tanggal_order) BETWEEN '$startDate' AND '$endDate'";
+    }
+    
+    $sql = "SELECT 
+                o.id_order,
+                o.kode_order,
+                o.tanggal_order,
+                o.status_order,
+                o.total_harga,
+                u.nama as nama_customer,
+                u.email as email_customer,
+                (SELECT COUNT(*) FROM order_items WHERE id_order = o.id_order) as jumlah_item
+            FROM orders o
+            LEFT JOIN users u ON o.id_user = u.id_user
+            WHERE o.status_order NOT IN ('dibatalkan')
+            $whereDate
+            ORDER BY o.tanggal_order DESC";
+    
+    $result = $db->query($sql);
+    
+    $data = [];
+    $totalPenjualan = 0;
+    $totalTransaksi = 0;
+    $totalItem = 0;
+    
+    while ($row = $result->fetch_assoc()) {
+        $data[] = [
+            'id_order' => $row['id_order'],
+            'kode_order' => $row['kode_order'],
+            'tanggal_order' => $row['tanggal_order'],
+            'nama_customer' => $row['nama_customer'],
+            'email_customer' => $row['email_customer'],
+            'status_order' => $row['status_order'],
+            'total_harga' => floatval($row['total_harga']),
+            'jumlah_item' => intval($row['jumlah_item'])
+        ];
+        
+        if ($row['status_order'] !== 'pending') {
+            $totalPenjualan += floatval($row['total_harga']);
+            $totalTransaksi++;
+            $totalItem += intval($row['jumlah_item']);
+        }
+    }
+    
+    Response::success([
+        'total_penjualan' => $totalPenjualan,
+        'jumlah_transaksi' => $totalTransaksi,
+        'total_item' => $totalItem,
+        'orders' => $data
+    ]);
+}
+
+// ============================================
 // GET ALL - Ambil semua pesanan (FIXED)
 // ============================================
 function getAll($db) {
+    error_log("=== GET ALL ORDERS ===");
+    
     $sql = "SELECT o.*, 
             u.nama as nama_customer, 
             u.email as email_customer, 
             u.no_telepon as telepon_customer,
             u.alamat as alamat_pengiriman,
-            k.nama as nama_kasir
+            k.nama as nama_kasir,
+            (SELECT COUNT(*) FROM order_items WHERE id_order = o.id_order) as jumlah_item
             FROM orders o
             LEFT JOIN users u ON o.id_user = u.id_user
             LEFT JOIN users k ON o.id_kasir = k.id_user
             ORDER BY o.tanggal_order DESC";
     
     $result = $db->query($sql);
+    
+    if (!$result) {
+        error_log("Query error: " . $db->error);
+        Response::error('Database query failed: ' . $db->error, 500);
+        return;
+    }
     
     $data = [];
     while ($row = $result->fetch_assoc()) {
@@ -91,16 +240,18 @@ function getAll($db) {
             'jenis_order' => $row['jenis_order'],
             'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
             'status_order' => $row['status_order'],
-            // ✅ REMOVED: status_pembayaran (gak perlu, frontend pakai status_order)
-            'subtotal' => $row['subtotal'],
-            'diskon' => $row['diskon'],
-            'ongkir' => $row['ongkir'],
-            'total_harga' => $row['total_harga'],
+            'subtotal' => floatval($row['subtotal']),
+            'diskon' => floatval($row['diskon']),
+            'ongkir' => floatval($row['ongkir']),
+            'total_harga' => floatval($row['total_harga']),
             'catatan' => $row['catatan_pelanggan'],
             'catatan_internal' => $row['catatan_internal'],
-            'tanggal_selesai' => $row['tanggal_selesai']
+            'tanggal_selesai' => $row['tanggal_selesai'],
+            'jumlah_item' => intval($row['jumlah_item'])
         ];
     }
+    
+    error_log("Total orders: " . count($data));
     
     Response::success([
         'total' => count($data),
@@ -136,7 +287,7 @@ function byUser($db) {
             'jenis_order' => $row['jenis_order'],
             'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
             'status_order' => $row['status_order'],
-            'total_harga' => $row['total_harga']
+            'total_harga' => floatval($row['total_harga'])
         ];
     }
     
@@ -176,7 +327,7 @@ function byStatus($db) {
             'nama_customer' => $row['nama_customer'],
             'tanggal_order' => $row['tanggal_order'],
             'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
-            'total_harga' => $row['total_harga']
+            'total_harga' => floatval($row['total_harga'])
         ];
     }
     
@@ -242,7 +393,7 @@ function create($db) {
         $total_harga = $_POST['total_harga'] ?? 0;
         $catatan_pelanggan = $_POST['catatan_pelanggan'] ?? '';
         $catatan_internal = $_POST['catatan_internal'] ?? '';
-        $status_order = $_POST['status_order'] ?? 'pending'; // ✅ BISA SET STATUS AWAL
+        $status_order = $_POST['status_order'] ?? 'pending';
         
         error_log("Parsed - id_user: $id_user, id_kasir: $id_kasir, status: $status_order");
         
@@ -403,11 +554,10 @@ function detail($db) {
         'jenis_order' => $row['jenis_order'],
         'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
         'status_order' => $row['status_order'],
-        // ✅ REMOVED: status_pembayaran (frontend pakai status_order)
-        'subtotal' => $row['subtotal'],
-        'diskon' => $row['diskon'],
-        'ongkir' => $row['ongkir'],
-        'total_harga' => $row['total_harga'],
+        'subtotal' => floatval($row['subtotal']),
+        'diskon' => floatval($row['diskon']),
+        'ongkir' => floatval($row['ongkir']),
+        'total_harga' => floatval($row['total_harga']),
         'catatan' => $row['catatan_pelanggan'],
         'catatan_internal' => $row['catatan_internal'],
         'tanggal_selesai' => $row['tanggal_selesai'],
