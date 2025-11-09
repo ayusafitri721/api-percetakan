@@ -1,13 +1,12 @@
 <?php
 /**
- * API Design Files - CRUD Tabel design_files
- * FIXED: Return JSON dengan benar
+ * API Design Files - FIXED COMPLETE
+ * Support is_result dan keterangan untuk memisahkan file design dan file hasil
  */
 
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-// Set header JSON
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE');
@@ -16,18 +15,18 @@ header('Access-Control-Allow-Headers: Content-Type');
 require_once '../config/database.php';
 require_once '../helpers/Response.php';
 
-// Koneksi database
 $database = new Database();
 $db = $database->connect();
 
-// Get operation
 $op = $_GET['op'] ?? '';
 
 error_log("=== DESIGN_FILES API CALLED ===");
 error_log("Operation: $op");
-error_log("GET params: " . print_r($_GET, true));
 
 switch ($op) {
+    case 'by_order':
+        byOrder($db);
+        break;
     case 'create':
         create($db);
         break;
@@ -39,9 +38,6 @@ switch ($op) {
         break;
     case 'delete':
         delete($db);
-        break;
-    case 'by_order':
-        byOrder($db);
         break;
     case 'validate':
         validateFile($db);
@@ -55,33 +51,44 @@ switch ($op) {
 }
 
 // ============================================
-// BY ORDER - FIXED VERSION
+// BY ORDER - FIXED DENGAN is_result & keterangan
 // ============================================
 function byOrder($db) {
     $id_order = $_GET['id_order'] ?? '';
     
-    error_log("=== BY_ORDER FUNCTION CALLED ===");
+    error_log("=== BY_ORDER CALLED ===");
     error_log("id_order: $id_order");
     
     if (empty($id_order)) {
-        error_log("ERROR: id_order kosong");
         Response::error('ID order tidak ditemukan', 400);
         return;
     }
     
-    // Escape input
-    $id_order = mysqli_real_escape_string($db, $id_order);
+    $id_order = $db->real_escape_string($id_order);
     
-    $sql = "SELECT * FROM design_files 
+    // ✅ SELECT dengan COALESCE untuk handle NULL
+    $sql = "SELECT 
+                id_file,
+                id_order,
+                nama_file,
+                file_url,
+                ukuran_file,
+                tipe_file,
+                COALESCE(keterangan, '') as keterangan,
+                COALESCE(is_result, 0) as is_result,
+                status_validasi,
+                catatan_validasi,
+                tanggal_upload
+            FROM design_files 
             WHERE id_order = '$id_order'
-            ORDER BY tanggal_upload DESC";
+            ORDER BY is_result ASC, tanggal_upload DESC";
     
     error_log("SQL: $sql");
     
     $result = $db->query($sql);
     
     if (!$result) {
-        error_log("ERROR: Query failed - " . $db->error);
+        error_log("ERROR: " . $db->error);
         Response::error('Query failed: ' . $db->error, 500);
         return;
     }
@@ -90,18 +97,21 @@ function byOrder($db) {
     while ($row = $result->fetch_assoc()) {
         $data[] = [
             'id_file' => $row['id_file'],
+            'id_order' => $row['id_order'],
             'nama_file' => $row['nama_file'],
             'file_url' => $row['file_url'],
             'ukuran_file' => (int)$row['ukuran_file'],
             'tipe_file' => $row['tipe_file'],
+            'keterangan' => $row['keterangan'] ?: '',
+            'is_result' => (int)$row['is_result'],
             'status_validasi' => $row['status_validasi'],
             'catatan_validasi' => $row['catatan_validasi'],
             'tanggal_upload' => $row['tanggal_upload']
         ];
     }
     
-    error_log("Total files found: " . count($data));
-    error_log("Files data: " . json_encode($data));
+    error_log("Files found: " . count($data));
+    error_log("Data: " . json_encode($data));
     
     Response::success([
         'total' => count($data),
@@ -120,8 +130,8 @@ function getAll($db) {
             ORDER BY df.tanggal_upload DESC";
     
     $result = $db->query($sql);
-    
     $data = [];
+    
     while ($row = $result->fetch_assoc()) {
         $data[] = [
             'id_file' => $row['id_file'],
@@ -130,8 +140,10 @@ function getAll($db) {
             'nama_pelanggan' => $row['nama_pelanggan'],
             'nama_file' => $row['nama_file'],
             'file_url' => $row['file_url'],
-            'ukuran_file' => $row['ukuran_file'],
+            'ukuran_file' => (int)$row['ukuran_file'],
             'tipe_file' => $row['tipe_file'],
+            'keterangan' => $row['keterangan'] ?? '',
+            'is_result' => (int)($row['is_result'] ?? 0),
             'status_validasi' => $row['status_validasi'],
             'catatan_validasi' => $row['catatan_validasi'],
             'tanggal_upload' => $row['tanggal_upload'],
@@ -146,6 +158,62 @@ function getAll($db) {
 }
 
 // ============================================
+// CREATE - DENGAN is_result & keterangan
+// ============================================
+function create($db) {
+    $id_order = $_POST['id_order'] ?? '';
+    $nama_file = $_POST['nama_file'] ?? '';
+    $file_url = $_POST['file_url'] ?? '';
+    $ukuran_file = $_POST['ukuran_file'] ?? 0;
+    $tipe_file = $_POST['tipe_file'] ?? '';
+    $is_result = $_POST['is_result'] ?? 0;
+    $keterangan = $_POST['keterangan'] ?? '';
+    
+    if (empty($id_order) || empty($nama_file) || empty($file_url)) {
+        Response::error('ID order, nama file, dan URL file wajib diisi', 400);
+        return;
+    }
+    
+    $id_order = $db->real_escape_string($id_order);
+    $nama_file = $db->real_escape_string($nama_file);
+    $file_url = $db->real_escape_string($file_url);
+    $ukuran_file = (int)$ukuran_file;
+    $tipe_file = $db->real_escape_string($tipe_file);
+    $is_result = (int)$is_result;
+    $keterangan = $db->real_escape_string($keterangan);
+    
+    // Cek order
+    $checkOrder = "SELECT id_order FROM orders WHERE id_order = '$id_order'";
+    $resultOrder = $db->query($checkOrder);
+    if ($resultOrder->num_rows === 0) {
+        Response::error('Order tidak ditemukan', 400);
+        return;
+    }
+    
+    $sql = "INSERT INTO design_files (
+                id_order, nama_file, file_url, ukuran_file, tipe_file, 
+                is_result, keterangan, status_validasi
+            ) VALUES (
+                '$id_order', '$nama_file', '$file_url', $ukuran_file, '$tipe_file',
+                $is_result, '$keterangan', 'approved'
+            )";
+    
+    if (!$db->query($sql)) {
+        Response::error('Database error: ' . $db->error, 500);
+        return;
+    }
+    
+    $insertId = $db->insert_id;
+    
+    Response::created([
+        'id_file' => $insertId,
+        'nama_file' => $nama_file,
+        'is_result' => $is_result,
+        'keterangan' => $keterangan
+    ], 'File berhasil diupload');
+}
+
+// ============================================
 // PENDING FILES
 // ============================================
 function pendingFiles($db) {
@@ -157,8 +225,8 @@ function pendingFiles($db) {
             ORDER BY df.tanggal_upload ASC";
     
     $result = $db->query($sql);
-    
     $data = [];
+    
     while ($row = $result->fetch_assoc()) {
         $data[] = [
             'id_file' => $row['id_file'],
@@ -191,11 +259,10 @@ function validateFile($db) {
         return;
     }
     
-    $id = mysqli_real_escape_string($db, $id);
-    $status = mysqli_real_escape_string($db, $status);
-    $catatan = mysqli_real_escape_string($db, $catatan);
+    $id = $db->real_escape_string($id);
+    $status = $db->real_escape_string($status);
+    $catatan = $db->real_escape_string($catatan);
     
-    // Cek file ada
     $checkSql = "SELECT id_file FROM design_files WHERE id_file = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -203,7 +270,6 @@ function validateFile($db) {
         return;
     }
     
-    // Update validasi
     $sql = "UPDATE design_files 
             SET status_validasi = '$status', 
                 catatan_validasi = '$catatan',
@@ -219,48 +285,6 @@ function validateFile($db) {
 }
 
 // ============================================
-// CREATE
-// ============================================
-function create($db) {
-    $id_order = $_POST['id_order'] ?? '';
-    $nama_file = $_POST['nama_file'] ?? '';
-    $file_url = $_POST['file_url'] ?? '';
-    $ukuran_file = $_POST['ukuran_file'] ?? 0;
-    $tipe_file = $_POST['tipe_file'] ?? '';
-    
-    if (empty($id_order) || empty($nama_file) || empty($file_url)) {
-        Response::error('ID order, nama file, dan URL file wajib diisi', 400);
-        return;
-    }
-    
-    $id_order = mysqli_real_escape_string($db, $id_order);
-    $nama_file = mysqli_real_escape_string($db, $nama_file);
-    $file_url = mysqli_real_escape_string($db, $file_url);
-    $ukuran_file = mysqli_real_escape_string($db, $ukuran_file);
-    $tipe_file = mysqli_real_escape_string($db, $tipe_file);
-    
-    // Cek order ada
-    $checkOrder = "SELECT id_order FROM orders WHERE id_order = '$id_order'";
-    $resultOrder = $db->query($checkOrder);
-    if ($resultOrder->num_rows === 0) {
-        Response::error('Order tidak ditemukan', 400);
-        return;
-    }
-    
-    // Insert
-    $sql = "INSERT INTO design_files (id_order, nama_file, file_url, ukuran_file, tipe_file, status_validasi) 
-            VALUES ('$id_order', '$nama_file', '$file_url', '$ukuran_file', '$tipe_file', 'pending')";
-    
-    $db->query($sql);
-    $insertId = $db->insert_id;
-    
-    Response::created([
-        'id_file' => $insertId,
-        'nama_file' => $nama_file
-    ], 'File berhasil diupload');
-}
-
-// ============================================
 // DETAIL
 // ============================================
 function detail($db) {
@@ -271,7 +295,7 @@ function detail($db) {
         return;
     }
     
-    $id = mysqli_real_escape_string($db, $id);
+    $id = $db->real_escape_string($id);
     
     $sql = "SELECT df.*, o.kode_order, u.nama as nama_pelanggan
             FROM design_files df
@@ -287,22 +311,23 @@ function detail($db) {
     }
     
     $row = $result->fetch_assoc();
-    $data = [
+    
+    Response::success([
         'id_file' => $row['id_file'],
         'id_order' => $row['id_order'],
         'kode_order' => $row['kode_order'],
         'nama_pelanggan' => $row['nama_pelanggan'],
         'nama_file' => $row['nama_file'],
         'file_url' => $row['file_url'],
-        'ukuran_file' => $row['ukuran_file'],
+        'ukuran_file' => (int)$row['ukuran_file'],
         'tipe_file' => $row['tipe_file'],
+        'keterangan' => $row['keterangan'] ?? '',
+        'is_result' => (int)($row['is_result'] ?? 0),
         'status_validasi' => $row['status_validasi'],
         'catatan_validasi' => $row['catatan_validasi'],
         'tanggal_upload' => $row['tanggal_upload'],
         'tanggal_validasi' => $row['tanggal_validasi']
-    ];
-    
-    Response::success($data);
+    ]);
 }
 
 // ============================================
@@ -316,9 +341,8 @@ function update($db) {
         return;
     }
     
-    $id = mysqli_real_escape_string($db, $id);
+    $id = $db->real_escape_string($id);
     
-    // Cek file ada
     $checkSql = "SELECT id_file FROM design_files WHERE id_file = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -326,21 +350,20 @@ function update($db) {
         return;
     }
     
-    // Build update query
     $updates = [];
     
     if (isset($_POST['nama_file'])) {
-        $nama = mysqli_real_escape_string($db, $_POST['nama_file']);
+        $nama = $db->real_escape_string($_POST['nama_file']);
         $updates[] = "nama_file = '$nama'";
     }
     
     if (isset($_POST['file_url'])) {
-        $url = mysqli_real_escape_string($db, $_POST['file_url']);
+        $url = $db->real_escape_string($_POST['file_url']);
         $updates[] = "file_url = '$url'";
     }
     
     if (isset($_POST['catatan_validasi'])) {
-        $catatan = mysqli_real_escape_string($db, $_POST['catatan_validasi']);
+        $catatan = $db->real_escape_string($_POST['catatan_validasi']);
         $updates[] = "catatan_validasi = '$catatan'";
     }
     
@@ -366,9 +389,8 @@ function delete($db) {
         return;
     }
     
-    $id = mysqli_real_escape_string($db, $id);
+    $id = $db->real_escape_string($id);
     
-    // Cek file ada
     $checkSql = "SELECT id_file FROM design_files WHERE id_file = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -376,7 +398,6 @@ function delete($db) {
         return;
     }
     
-    // Hard delete
     $sql = "DELETE FROM design_files WHERE id_file = '$id'";
     $db->query($sql);
     
