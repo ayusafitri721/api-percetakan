@@ -1,8 +1,8 @@
 <?php
 /**
  * API Orders - CRUD Tabel orders
- * URL: http://localhost/api-percetakan/api/orders.php
- * FIXED: Untuk Laporan & Statistik
+ * FIXED: Sinkronisasi status_order dengan ENUM database
+ * ENUM: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan
  */
 
 // ENABLE ERROR REPORTING FOR DEBUGGING
@@ -66,7 +66,15 @@ switch ($op) {
 }
 
 // ============================================
-// STATISTICS - Untuk Dashboard Laporan (BARU)
+// HELPER: Validasi Status Order
+// ============================================
+function validateStatusOrder($status) {
+    $validStatuses = ['pending', 'dibayar', 'diproses', 'validasi', 'cetak', 'selesai', 'dikirim', 'dibatalkan'];
+    return in_array($status, $validStatuses) ? $status : false;
+}
+
+// ============================================
+// STATISTICS - Untuk Dashboard Laporan
 // ============================================
 function statistics($db) {
     $startDate = $_GET['start_date'] ?? '';
@@ -83,7 +91,7 @@ function statistics($db) {
                       AND YEAR(o.tanggal_order) = YEAR(CURRENT_DATE())";
     }
     
-    // Total Penjualan
+    // Total Penjualan (exclude dibatalkan dan pending)
     $totalSql = "SELECT 
                     COALESCE(SUM(total_harga), 0) as total_penjualan,
                     COUNT(*) as jumlah_transaksi
@@ -137,7 +145,7 @@ function statistics($db) {
 }
 
 // ============================================
-// SALES REPORT - Laporan Penjualan Detail (BARU)
+// SALES REPORT - Laporan Penjualan Detail
 // ============================================
 function salesReport($db) {
     $startDate = $_GET['start_date'] ?? '';
@@ -200,7 +208,7 @@ function salesReport($db) {
 }
 
 // ============================================
-// GET ALL - Ambil semua pesanan (FIXED)
+// GET ALL - Ambil semua pesanan
 // ============================================
 function getAll($db) {
     error_log("=== GET ALL ORDERS ===");
@@ -211,10 +219,13 @@ function getAll($db) {
             u.no_telepon as telepon_customer,
             u.alamat as alamat_pengiriman,
             k.nama as nama_kasir,
+            p.status_pembayaran,
+            p.metode_pembayaran,
             (SELECT COUNT(*) FROM order_items WHERE id_order = o.id_order) as jumlah_item
             FROM orders o
             LEFT JOIN users u ON o.id_user = u.id_user
             LEFT JOIN users k ON o.id_kasir = k.id_user
+            LEFT JOIN payments p ON o.id_order = p.id_order
             ORDER BY o.tanggal_order DESC";
     
     $result = $db->query($sql);
@@ -240,6 +251,8 @@ function getAll($db) {
             'jenis_order' => $row['jenis_order'],
             'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
             'status_order' => $row['status_order'],
+            'status_pembayaran' => $row['status_pembayaran'],
+            'metode_pembayaran' => $row['metode_pembayaran'],
             'subtotal' => floatval($row['subtotal']),
             'diskon' => floatval($row['diskon']),
             'ongkir' => floatval($row['ongkir']),
@@ -272,9 +285,11 @@ function byUser($db) {
     
     $id_user = intval($id_user);
     
-    $sql = "SELECT * FROM orders 
-            WHERE id_user = $id_user
-            ORDER BY tanggal_order DESC";
+    $sql = "SELECT o.*, p.status_pembayaran 
+            FROM orders o
+            LEFT JOIN payments p ON o.id_order = p.id_order
+            WHERE o.id_user = $id_user
+            ORDER BY o.tanggal_order DESC";
     
     $result = $db->query($sql);
     
@@ -287,6 +302,7 @@ function byUser($db) {
             'jenis_order' => $row['jenis_order'],
             'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
             'status_order' => $row['status_order'],
+            'status_pembayaran' => $row['status_pembayaran'],
             'total_harga' => floatval($row['total_harga'])
         ];
     }
@@ -310,10 +326,18 @@ function byStatus($db) {
     
     $status = $db->real_escape_string($status);
     
+    // Validasi status
+    if (!validateStatusOrder($status)) {
+        Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+        return;
+    }
+    
     $sql = "SELECT o.*, 
-            u.nama as nama_customer
+            u.nama as nama_customer,
+            p.status_pembayaran
             FROM orders o
             LEFT JOIN users u ON o.id_user = u.id_user
+            LEFT JOIN payments p ON o.id_order = p.id_order
             WHERE o.status_order = '$status'
             ORDER BY o.tanggal_order DESC";
     
@@ -327,6 +351,7 @@ function byStatus($db) {
             'nama_customer' => $row['nama_customer'],
             'tanggal_order' => $row['tanggal_order'],
             'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
+            'status_pembayaran' => $row['status_pembayaran'],
             'total_harga' => floatval($row['total_harga'])
         ];
     }
@@ -338,7 +363,7 @@ function byStatus($db) {
 }
 
 // ============================================
-// UPDATE STATUS - Update status order
+// UPDATE STATUS - Update status order (FIXED)
 // ============================================
 function updateStatus($db) {
     $id = $_POST['id_order'] ?? '';
@@ -352,6 +377,12 @@ function updateStatus($db) {
     $id = intval($id);
     $status = $db->real_escape_string($status);
     
+    // ✅ Validasi status sesuai ENUM
+    if (!validateStatusOrder($status)) {
+        Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+        return;
+    }
+    
     // Cek order ada
     $checkSql = "SELECT id_order FROM orders WHERE id_order = $id";
     $checkResult = $db->query($checkSql);
@@ -363,19 +394,23 @@ function updateStatus($db) {
     // Update status
     $sql = "UPDATE orders SET status_order = '$status'";
     
-    // Jika status selesai, set tanggal selesai
-    if ($status === 'selesai') {
+    // Jika status dikirim (diserahkan ke customer), set tanggal selesai
+    if ($status === 'dikirim' || $status === 'selesai') {
         $sql .= ", tanggal_selesai = NOW()";
     }
     
     $sql .= " WHERE id_order = $id";
-    $db->query($sql);
+    
+    if (!$db->query($sql)) {
+        Response::error('Database error: ' . $db->error, 500);
+        return;
+    }
     
     Response::success(['id_order' => $id, 'status' => $status], 'Status order berhasil diupdate');
 }
 
 // ============================================
-// CREATE - Tambah order baru (FIXED)
+// CREATE - Tambah order baru
 // ============================================
 function create($db) {
     try {
@@ -394,6 +429,13 @@ function create($db) {
         $catatan_pelanggan = $_POST['catatan_pelanggan'] ?? '';
         $catatan_internal = $_POST['catatan_internal'] ?? '';
         $status_order = $_POST['status_order'] ?? 'pending';
+        
+        // ✅ Validasi status order
+        if (!validateStatusOrder($status_order)) {
+            error_log("ERROR: Status order tidak valid: $status_order");
+            Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+            return;
+        }
         
         error_log("Parsed - id_user: $id_user, id_kasir: $id_kasir, status: $status_order");
         
@@ -481,7 +523,7 @@ function create($db) {
 }
 
 // ============================================
-// DETAIL - Detail order (FIXED)
+// DETAIL - Detail order
 // ============================================
 function detail($db) {
     $id = $_GET['id'] ?? '';
@@ -498,10 +540,13 @@ function detail($db) {
             u.email as email_customer, 
             u.no_telepon as telepon_customer, 
             u.alamat as alamat_pengiriman,
-            k.nama as nama_kasir
+            k.nama as nama_kasir,
+            p.status_pembayaran,
+            p.metode_pembayaran
             FROM orders o
             LEFT JOIN users u ON o.id_user = u.id_user
             LEFT JOIN users k ON o.id_kasir = k.id_user
+            LEFT JOIN payments p ON o.id_order = p.id_order
             WHERE o.id_order = $id";
     
     $result = $db->query($sql);
@@ -554,6 +599,8 @@ function detail($db) {
         'jenis_order' => $row['jenis_order'],
         'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
         'status_order' => $row['status_order'],
+        'status_pembayaran' => $row['status_pembayaran'],
+        'metode_pembayaran' => $row['metode_pembayaran'],
         'subtotal' => floatval($row['subtotal']),
         'diskon' => floatval($row['diskon']),
         'ongkir' => floatval($row['ongkir']),
@@ -599,9 +646,16 @@ function update($db) {
     
     if (isset($_POST['status_order'])) {
         $status = $db->real_escape_string($_POST['status_order']);
+        
+        // ✅ Validasi status
+        if (!validateStatusOrder($status)) {
+            Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+            return;
+        }
+        
         $updates[] = "status_order = '$status'";
         
-        if ($status === 'selesai') {
+        if ($status === 'selesai' || $status === 'dikirim') {
             $updates[] = "tanggal_selesai = NOW()";
         }
         

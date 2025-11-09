@@ -2,7 +2,7 @@
 /**
  * API Payments - CRUD Tabel payments
  * URL: http://localhost/api-percetakan/api/payments.php
- * FIXED: real_escape_string & insert_id
+ * FIXED: Offline payment langsung set order ke "diproses"
  */
 
 error_reporting(E_ALL);
@@ -205,9 +205,9 @@ function confirmPayment($db) {
     
     $db->query($sql);
     
-    // Jika diterima, update status order
+    // ✅ FIXED: Jika diterima, update status order ke "diproses" bukan "dibayar"
     if ($status === 'diterima') {
-        $updateOrder = "UPDATE orders SET status_order = 'dibayar' WHERE id_order = '$id_order'";
+        $updateOrder = "UPDATE orders SET status_order = 'diproses' WHERE id_order = '$id_order'";
         $db->query($updateOrder);
     }
     
@@ -249,7 +249,7 @@ function create($db) {
         }
         
         // Cek order ada
-        $checkOrder = "SELECT id_order FROM orders WHERE id_order = " . intval($id_order);
+        $checkOrder = "SELECT id_order, jenis_order FROM orders WHERE id_order = " . intval($id_order);
         $resultOrder = $db->query($checkOrder);
         if ($resultOrder->num_rows === 0) {
             error_log("ERROR: Order not found");
@@ -257,10 +257,13 @@ function create($db) {
             return;
         }
         
+        $orderData = $resultOrder->fetch_assoc();
+        $jenis_order = $orderData['jenis_order'];
+        
         // ✅ FIXED: Kasir offline langsung set status "diterima" (sudah bayar tunai)
         $status_pembayaran = 'diterima'; // Offline = langsung lunas
         
-        // Insert
+        // Insert payment
         $sql = "INSERT INTO payments (
                     id_order, metode_pembayaran, nama_bank, nomor_rekening, 
                     nama_pemilik, jumlah_bayar, bukti_bayar, status_pembayaran
@@ -283,8 +286,16 @@ function create($db) {
             return;
         }
         
-        $insertId = $db->insert_id; // ✅ FIXED
+        $insertId = $db->insert_id;
         error_log("Payment created! ID: $insertId");
+        
+        // ✅ FIXED: Update order status ke "diproses" untuk offline, bukan "dibayar"
+        // Karena pembayaran offline sudah lunas dan perlu langsung dikerjakan operator
+        if ($jenis_order === 'offline') {
+            $updateOrderSql = "UPDATE orders SET status_order = 'diproses' WHERE id_order = " . intval($id_order);
+            $db->query($updateOrderSql);
+            error_log("Order status updated to 'diproses' for offline payment");
+        }
         
         Response::success([
             'id_payment' => $insertId,
@@ -400,7 +411,7 @@ function delete($db) {
         Response::error('ID payment tidak ditemukan', 400);
         return;
     }
-    
+        
     // Cek payment ada
     $checkSql = "SELECT id_payment FROM payments WHERE id_payment = '$id'";
     $checkResult = $db->query($checkSql);

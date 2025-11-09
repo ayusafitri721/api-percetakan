@@ -119,52 +119,122 @@ function byOrder($db) {
 // CREATE - Tambah item ke order
 // ============================================
 function create($db) {
-    $id_order = $db->escape($_POST['id_order'] ?? '');
-    $id_product = $db->escape($_POST['id_product'] ?? '');
-    $ukuran = $db->escape($_POST['ukuran'] ?? '');
-    $jumlah = $db->escape($_POST['jumlah'] ?? 1);
-    $harga_satuan = $db->escape($_POST['harga_satuan'] ?? 0);
-    $keterangan = $db->escape($_POST['keterangan'] ?? '');
-    
-    // Validasi
+    // Debug: Lihat semua input
+    error_log("POST: " . print_r($_POST, true));
+    error_log("FILES: " . print_r($_FILES, true));
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        Response::error('Method not allowed', 405);
+    }
+
+    $id_order = $_POST['id_order'] ?? '';
+    $id_product = $_POST['id_product'] ?? '';
+    $ukuran = $_POST['ukuran'] ?? 'Standard';
+    $jumlah = (int)($_POST['jumlah'] ?? 1);
+    $harga_satuan = (float)($_POST['harga_satuan'] ?? 0);
+    $keterangan = $_POST['keterangan'] ?? '';
+
+    // VALIDASI
     if (empty($id_order) || empty($id_product)) {
-        Response::error('ID order dan ID product wajib diisi', 400);
+        Response::error('id_order dan id_product wajib diisi', 400);
     }
-    
-    // Cek order ada
-    $checkOrder = "SELECT id_order FROM orders WHERE id_order = '$id_order'";
-    $resultOrder = $db->query($checkOrder);
-    if ($resultOrder->num_rows === 0) {
-        Response::error('Order tidak ditemukan', 400);
+
+    // Cek order
+    $check = $db->query("SELECT id_order FROM orders WHERE id_order = '$id_order'");
+    if ($check->num_rows === 0) {
+        Response::error("Order ID $id_order tidak ditemukan", 404);
     }
-    
-    // Cek product ada
-    $checkProduct = "SELECT nama_product FROM products WHERE id_product = '$id_product'";
-    $resultProduct = $db->query($checkProduct);
-    if ($resultProduct->num_rows === 0) {
-        Response::error('Product tidak ditemukan', 400);
+
+    // Cek produk
+    $prod = $db->query("SELECT nama_product, harga_dasar FROM products WHERE id_product = '$id_product'")->fetch_assoc();
+    if (!$prod) {
+        Response::error("Produk ID $id_product tidak ditemukan", 404);
     }
-    
-    $nama_product = $resultProduct->fetch_assoc()['nama_product'];
-    
-    // Hitung subtotal
+
+    $nama_product = $prod['nama_product'];
+    $harga_satuan = $harga_satuan > 0 ? $harga_satuan : $prod['harga_dasar'];
     $subtotal = $jumlah * $harga_satuan;
-    
-    // Insert
-    $sql = "INSERT INTO order_items (id_order, id_product, nama_product, ukuran, jumlah, harga_satuan, subtotal, keterangan) 
-            VALUES ('$id_order', '$id_product', '$nama_product', '$ukuran', '$jumlah', '$harga_satuan', '$subtotal', '$keterangan')";
-    
-    $db->query($sql);
-    $insertId = $db->lastInsertId();
-    
-    // Update total order
-    updateOrderTotal($db, $id_order);
-    
-    Response::created([
-        'id_item' => $insertId,
-        'id_order' => $id_order,
-        'subtotal' => $subtotal
-    ], 'Item berhasil ditambahkan');
+
+    try {
+        $db->autocommit(false); // Mulai transaksi
+
+        // 1. Simpan order_items
+        $sql = "INSERT INTO order_items 
+                (id_order, id_product, nama_product, ukuran, jumlah, harga_satuan, subtotal, keterangan) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        $stmt = $db->prepare($sql);
+        if (!$stmt) throw new Exception("Prepare failed: " . $db->error);
+
+        $stmt->bind_param('iissidss', $id_order, $id_product, $nama_product, $ukuran, $jumlah, $harga_satuan, $subtotal, $keterangan);
+        if (!$stmt->execute()) throw new Exception("Execute failed: " . $stmt->error);
+
+        $id_item = $stmt->insert_id;
+        $stmt->close();
+
+        $design_file_id = null;
+        $file_url = null;
+
+        // 2. Upload file (jika ada)
+        if (isset($_FILES['file_desain']) && $_FILES['file_desain']['error'] === UPLOAD_ERR_OK) {
+            $file = $_FILES['file_desain'];
+            $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+            $allowed = ['jpg', 'jpeg', 'png', 'pdf'];
+
+            if (!in_array($ext, $allowed)) {
+                throw new Exception('Format file harus JPG, PNG, atau PDF');
+            }
+            if ($file['size'] > 10 * 1024 * 1024) {
+                throw new Exception('Ukuran file maksimal 10MB');
+            }
+
+            $uploadDir = '../uploads/design_files/';
+            if (!is_dir($uploadDir)) {
+                if (!mkdir($uploadDir, 0755, true)) {
+                    throw new Exception('Gagal buat folder upload');
+                }
+            }
+
+            $newName = "DESAIN_{$id_order}_{$id_item}_" . time() . ".{$ext}";
+            $uploadPath = $uploadDir . $newName;
+            $file_url = "http://localhost/api-percetakan/uploads/design_files/{$newName}";
+
+            if (!move_uploaded_file($file['tmp_name'], $uploadPath)) {
+                throw new Exception('Gagal simpan file ke server');
+            }
+
+            // Simpan ke design_files
+            $sqlFile = "INSERT INTO design_files 
+                        (id_order, nama_file, file_url, ukuran_file, tipe_file, status_validasi) 
+                        VALUES (?, ?, ?, ?, ?, 'pending')";
+            $stmtFile = $db->prepare($sqlFile);
+            if (!$stmtFile) throw new Exception("Prepare design_files failed: " . $db->error);
+
+            $stmtFile->bind_param('issis', $id_order, $file['name'], $file_url, $file['size'], $ext);
+            if (!$stmtFile->execute()) throw new Exception("Execute design_files failed: " . $stmtFile->error);
+
+            $design_file_id = $stmtFile->insert_id;
+            $stmtFile->close();
+        }
+
+        $db->commit();
+        $db->autocommit(true);
+
+        // Update total order
+        updateOrderTotal($db, $id_order);
+
+        Response::created([
+            'id_item' => $id_item,
+            'id_design_file' => $design_file_id,
+            'file_url' => $file_url,
+            'message' => 'Item berhasil disimpan'
+        ]);
+
+    } catch (Exception $e) {
+        $db->rollback();
+        $db->autocommit(true);
+        error_log("CREATE ITEM ERROR: " . $e->getMessage());
+        Response::error('Gagal simpan: ' . $e->getMessage(), 500);
+    }
 }
 
 // ============================================
