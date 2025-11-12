@@ -1,8 +1,8 @@
 <?php
 /**
  * API Orders - CRUD Tabel orders
- * FIXED: Sinkronisasi status_order dengan ENUM database
- * ENUM: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan
+ * FIXED: Support status 'siap' untuk kurir dan handle FormData
+ * ENUM: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan, siap
  */
 
 // ENABLE ERROR REPORTING FOR DEBUGGING
@@ -69,7 +69,8 @@ switch ($op) {
 // HELPER: Validasi Status Order
 // ============================================
 function validateStatusOrder($status) {
-    $validStatuses = ['pending', 'dibayar', 'diproses', 'validasi', 'cetak', 'selesai', 'dikirim', 'dibatalkan'];
+    // ✅ FIXED: Tambah 'siap' untuk kurir
+    $validStatuses = ['pending', 'dibayar', 'diproses', 'validasi', 'cetak', 'selesai', 'dikirim', 'dibatalkan', 'siap'];
     return in_array($status, $validStatuses) ? $status : false;
 }
 
@@ -328,7 +329,7 @@ function byStatus($db) {
     
     // Validasi status
     if (!validateStatusOrder($status)) {
-        Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+        Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan, siap', 400);
         return;
     }
     
@@ -379,7 +380,7 @@ function updateStatus($db) {
     
     // ✅ Validasi status sesuai ENUM
     if (!validateStatusOrder($status)) {
-        Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+        Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan, siap', 400);
         return;
     }
     
@@ -433,7 +434,7 @@ function create($db) {
         // ✅ Validasi status order
         if (!validateStatusOrder($status_order)) {
             error_log("ERROR: Status order tidak valid: $status_order");
-            Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+            Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan, siap', 400);
             return;
         }
         
@@ -617,12 +618,14 @@ function detail($db) {
 }
 
 // ============================================
-// UPDATE - Update order (FIXED)
+// UPDATE - Update order (FIXED untuk FormData)
 // ============================================
 function update($db) {
     error_log("=== UPDATE ORDER CALLED ===");
     error_log("GET params: " . print_r($_GET, true));
     error_log("POST params: " . print_r($_POST, true));
+    error_log("Content-Type: " . ($_SERVER['CONTENT_TYPE'] ?? 'not set'));
+    error_log("Request Method: " . $_SERVER['REQUEST_METHOD']);
     
     $id = $_GET['id'] ?? '';
     
@@ -633,13 +636,17 @@ function update($db) {
     
     $id = intval($id);
     
-    // Cek order ada
-    $checkSql = "SELECT id_order FROM orders WHERE id_order = $id";
+    // Cek order ada dan ambil jenis_order
+    $checkSql = "SELECT id_order, jenis_order FROM orders WHERE id_order = $id";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Order tidak ditemukan');
         return;
     }
+    
+    $orderData = $checkResult->fetch_assoc();
+    $jenis_order = $orderData['jenis_order'];
+    error_log("Order found: ID=$id, jenis_order=$jenis_order");
     
     // Build update query
     $updates = [];
@@ -649,7 +656,8 @@ function update($db) {
         
         // ✅ Validasi status
         if (!validateStatusOrder($status)) {
-            Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan', 400);
+            error_log("ERROR: Invalid status - $status");
+            Response::error('Status order tidak valid. Gunakan: pending, dibayar, diproses, validasi, cetak, selesai, dikirim, dibatalkan, siap', 400);
             return;
         }
         
@@ -659,7 +667,7 @@ function update($db) {
             $updates[] = "tanggal_selesai = NOW()";
         }
         
-        error_log("Status order will be updated to: $status");
+        error_log("✅ Status order will be updated to: $status for jenis_order: $jenis_order");
     }
     
     if (isset($_POST['kecepatan_pengerjaan'])) {
@@ -707,7 +715,7 @@ function update($db) {
         return;
     }
     
-    error_log("Update successful!");
+    error_log("✅ Update successful!");
     Response::success(['id_order' => $id], 'Order berhasil diupdate');
 }
 

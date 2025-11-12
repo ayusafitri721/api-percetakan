@@ -2,7 +2,7 @@
 /**
  * API Payments - CRUD Tabel payments
  * URL: http://localhost/api-percetakan/api/payments.php
- * FIXED: Offline payment langsung set order ke "diproses"
+ * FIXED: Status pembayaran sesuai request dari frontend
  */
 
 error_reporting(E_ALL);
@@ -233,6 +233,9 @@ function create($db) {
         $jumlah_bayar = floatval($_POST['jumlah_bayar'] ?? 0);
         $bukti_bayar = $db->real_escape_string($_POST['bukti_bayar'] ?? '');
         
+        // ✅ KEY FIX: Ambil status dari frontend, default 'pending'
+        $status_pembayaran = $db->real_escape_string($_POST['status_pembayaran'] ?? 'pending');
+        
         // Validasi
         if (empty($id_order) || empty($metode) || empty($jumlah_bayar)) {
             error_log("ERROR: Validation failed - id_order: $id_order, metode: $metode, jumlah: $jumlah_bayar");
@@ -260,8 +263,11 @@ function create($db) {
         $orderData = $resultOrder->fetch_assoc();
         $jenis_order = $orderData['jenis_order'];
         
-        // ✅ FIXED: Kasir offline langsung set status "diterima" (sudah bayar tunai)
-        $status_pembayaran = 'diterima'; // Offline = langsung lunas
+        // ✅ PENTING: Untuk offline/kasir, override status ke 'diterima' (sudah bayar tunai)
+        if ($jenis_order === 'offline' && $metode === 'cash') {
+            $status_pembayaran = 'diterima';
+            error_log("OFFLINE CASH: Auto set to 'diterima'");
+        }
         
         // Insert payment
         $sql = "INSERT INTO payments (
@@ -287,11 +293,10 @@ function create($db) {
         }
         
         $insertId = $db->insert_id;
-        error_log("Payment created! ID: $insertId");
+        error_log("Payment created! ID: $insertId, Status: $status_pembayaran");
         
-        // ✅ FIXED: Update order status ke "diproses" untuk offline, bukan "dibayar"
-        // Karena pembayaran offline sudah lunas dan perlu langsung dikerjakan operator
-        if ($jenis_order === 'offline') {
+        // ✅ FIXED: Update order status hanya untuk offline yang sudah lunas
+        if ($jenis_order === 'offline' && $status_pembayaran === 'diterima') {
             $updateOrderSql = "UPDATE orders SET status_order = 'diproses' WHERE id_order = " . intval($id_order);
             $db->query($updateOrderSql);
             error_log("Order status updated to 'diproses' for offline payment");
