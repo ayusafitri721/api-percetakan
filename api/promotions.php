@@ -39,6 +39,9 @@ switch ($op) {
     case 'active':
         activePromos($db);
         break;
+    case 'increment_usage': // ✅ TAMBAHAN BARU
+        incrementUsage($db);
+        break;
     default:
         getAll($db);
         break;
@@ -122,11 +125,12 @@ function activePromos($db) {
 // VALIDATE PROMO - Validasi kode promo
 // ============================================
 function validatePromo($db) {
-    $kode = $db->escape($_GET['kode'] ?? '');
-    $subtotal = $db->escape($_GET['subtotal'] ?? 0);
+    $kode = $db->real_escape_string($_GET['kode'] ?? '');
+    $subtotal = floatval($_GET['subtotal'] ?? 0);
     
     if (empty($kode)) {
         Response::error('Kode promo tidak ditemukan', 400);
+        return;
     }
     
     $today = date('Y-m-d');
@@ -141,6 +145,7 @@ function validatePromo($db) {
     
     if ($result->num_rows === 0) {
         Response::error('Kode promo tidak valid atau sudah kadaluarsa', 400);
+        return;
     }
     
     $promo = $result->fetch_assoc();
@@ -148,11 +153,13 @@ function validatePromo($db) {
     // Cek min pembelian
     if ($promo['min_pembelian'] > $subtotal) {
         Response::error('Minimal pembelian Rp ' . number_format($promo['min_pembelian'], 0, ',', '.'), 400);
+        return;
     }
     
     // Cek kuota
     if ($promo['max_penggunaan'] !== null && $promo['jumlah_terpakai'] >= $promo['max_penggunaan']) {
         Response::error('Kuota promo sudah habis', 400);
+        return;
     }
     
     // Hitung diskon
@@ -175,22 +182,58 @@ function validatePromo($db) {
 }
 
 // ============================================
+// ✅ INCREMENT USAGE - Update jumlah_terpakai
+// ============================================
+function incrementUsage($db) {
+    $id = $_GET['id'] ?? '';
+    
+    if (empty($id)) {
+        Response::error('ID promo tidak ditemukan', 400);
+        return;
+    }
+    
+    $id = intval($id);
+    
+    // Cek promo ada
+    $checkSql = "SELECT id_promo, jumlah_terpakai FROM promotions WHERE id_promo = $id";
+    $checkResult = $db->query($checkSql);
+    
+    if ($checkResult->num_rows === 0) {
+        Response::error('Promo tidak ditemukan', 404);
+        return;
+    }
+    
+    // Increment jumlah_terpakai
+    $sql = "UPDATE promotions 
+            SET jumlah_terpakai = jumlah_terpakai + 1 
+            WHERE id_promo = $id";
+    
+    if (!$db->query($sql)) {
+        Response::error('Gagal update usage promo: ' . $db->error, 500);
+        return;
+    }
+    
+    Response::success(['id_promo' => $id], 'Usage promo berhasil diupdate');
+}
+
+// ============================================
 // CREATE - Tambah promo baru
 // ============================================
 function create($db) {
-    $kode_promo = strtoupper($db->escape($_POST['kode_promo'] ?? ''));
-    $nama_promo = $db->escape($_POST['nama_promo'] ?? '');
-    $jenis = $db->escape($_POST['jenis'] ?? 'persentase');
-    $nilai_diskon = $db->escape($_POST['nilai_diskon'] ?? 0);
-    $min_pembelian = $db->escape($_POST['min_pembelian'] ?? 0);
+    $kode_promo = strtoupper($db->real_escape_string($_POST['kode_promo'] ?? ''));
+    $nama_promo = $db->real_escape_string($_POST['nama_promo'] ?? '');
+    $jenis = $db->real_escape_string($_POST['jenis'] ?? 'persentase');
+    $nilai_diskon = floatval($_POST['nilai_diskon'] ?? 0);
+    $min_pembelian = floatval($_POST['min_pembelian'] ?? 0);
     $max_penggunaan = $_POST['max_penggunaan'] ?? null;
-    $tanggal_mulai = $db->escape($_POST['tanggal_mulai'] ?? date('Y-m-d'));
-    $tanggal_akhir = $db->escape($_POST['tanggal_akhir'] ?? date('Y-m-d'));
+    $tanggal_mulai = $db->real_escape_string($_POST['tanggal_mulai'] ?? date('Y-m-d'));
+    $tanggal_akhir = $db->real_escape_string($_POST['tanggal_akhir'] ?? date('Y-m-d'));
     $status_aktif = isset($_POST['status_aktif']) ? (int)$_POST['status_aktif'] : 1;
     
     // Validasi
     if (empty($kode_promo) || empty($nama_promo)) {
         Response::error('Kode promo dan nama promo wajib diisi', 400);
+        return;
     }
     
     // Cek kode sudah ada
@@ -198,38 +241,45 @@ function create($db) {
     $resultCode = $db->query($checkCode);
     if ($resultCode->num_rows > 0) {
         Response::error('Kode promo sudah digunakan', 400);
+        return;
     }
     
     // Insert
-    $max_sql = $max_penggunaan ? "'$max_penggunaan'" : "NULL";
+    $max_sql = $max_penggunaan ? intval($max_penggunaan) : "NULL";
     $sql = "INSERT INTO promotions (kode_promo, nama_promo, jenis, nilai_diskon, min_pembelian, max_penggunaan, tanggal_mulai, tanggal_akhir, status_aktif) 
-            VALUES ('$kode_promo', '$nama_promo', '$jenis', '$nilai_diskon', '$min_pembelian', $max_sql, '$tanggal_mulai', '$tanggal_akhir', $status_aktif)";
+            VALUES ('$kode_promo', '$nama_promo', '$jenis', $nilai_diskon, $min_pembelian, $max_sql, '$tanggal_mulai', '$tanggal_akhir', $status_aktif)";
     
-    $db->query($sql);
-    $insertId = $db->lastInsertId();
+    if (!$db->query($sql)) {
+        Response::error('Gagal membuat promo: ' . $db->error, 500);
+        return;
+    }
     
-    Response::created([
+    $insertId = $db->insert_id;
+    
+    Response::success([
         'id_promo' => $insertId,
         'kode_promo' => $kode_promo
-    ], 'Promo berhasil ditambahkan');
+    ], 'Promo berhasil ditambahkan', 201);
 }
 
 // ============================================
 // DETAIL - Detail promo
 // ============================================
 function detail($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = intval($_GET['id'] ?? 0);
     
-    if (empty($id)) {
-        Response::error('ID promo tidak ditemukan', 400);
+    if ($id === 0) {
+        Response::error('ID promo tidak valid', 400);
+        return;
     }
     
-    $sql = "SELECT * FROM promotions WHERE id_promo = '$id'";
+    $sql = "SELECT * FROM promotions WHERE id_promo = $id";
     
     $result = $db->query($sql);
     
     if ($result->num_rows === 0) {
         Response::notFound('Promo tidak ditemukan');
+        return;
     }
     
     $row = $result->fetch_assoc();
@@ -255,65 +305,68 @@ function detail($db) {
 // UPDATE - Update promo
 // ============================================
 function update($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = intval($_GET['id'] ?? 0);
     
-    if (empty($id)) {
-        Response::error('ID promo tidak ditemukan', 400);
+    if ($id === 0) {
+        Response::error('ID promo tidak valid', 400);
+        return;
     }
     
     // Cek promo ada
-    $checkSql = "SELECT id_promo FROM promotions WHERE id_promo = '$id'";
+    $checkSql = "SELECT id_promo FROM promotions WHERE id_promo = $id";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Promo tidak ditemukan');
+        return;
     }
     
     // Build update query
     $updates = [];
     
     if (isset($_POST['kode_promo'])) {
-        $kode = strtoupper($db->escape($_POST['kode_promo']));
+        $kode = strtoupper($db->real_escape_string($_POST['kode_promo']));
         // Cek kode duplikat
-        $checkCode = "SELECT id_promo FROM promotions WHERE kode_promo = '$kode' AND id_promo != '$id'";
+        $checkCode = "SELECT id_promo FROM promotions WHERE kode_promo = '$kode' AND id_promo != $id";
         $resultCode = $db->query($checkCode);
         if ($resultCode->num_rows > 0) {
             Response::error('Kode promo sudah digunakan', 400);
+            return;
         }
         $updates[] = "kode_promo = '$kode'";
     }
     
     if (isset($_POST['nama_promo'])) {
-        $nama = $db->escape($_POST['nama_promo']);
+        $nama = $db->real_escape_string($_POST['nama_promo']);
         $updates[] = "nama_promo = '$nama'";
     }
     
     if (isset($_POST['jenis'])) {
-        $jenis = $db->escape($_POST['jenis']);
+        $jenis = $db->real_escape_string($_POST['jenis']);
         $updates[] = "jenis = '$jenis'";
     }
     
     if (isset($_POST['nilai_diskon'])) {
-        $nilai = $db->escape($_POST['nilai_diskon']);
-        $updates[] = "nilai_diskon = '$nilai'";
+        $nilai = floatval($_POST['nilai_diskon']);
+        $updates[] = "nilai_diskon = $nilai";
     }
     
     if (isset($_POST['min_pembelian'])) {
-        $min = $db->escape($_POST['min_pembelian']);
-        $updates[] = "min_pembelian = '$min'";
+        $min = floatval($_POST['min_pembelian']);
+        $updates[] = "min_pembelian = $min";
     }
     
     if (isset($_POST['max_penggunaan'])) {
-        $max = $_POST['max_penggunaan'] ? "'" . $db->escape($_POST['max_penggunaan']) . "'" : "NULL";
+        $max = $_POST['max_penggunaan'] ? intval($_POST['max_penggunaan']) : "NULL";
         $updates[] = "max_penggunaan = $max";
     }
     
     if (isset($_POST['tanggal_mulai'])) {
-        $tgl_mulai = $db->escape($_POST['tanggal_mulai']);
+        $tgl_mulai = $db->real_escape_string($_POST['tanggal_mulai']);
         $updates[] = "tanggal_mulai = '$tgl_mulai'";
     }
     
     if (isset($_POST['tanggal_akhir'])) {
-        $tgl_akhir = $db->escape($_POST['tanggal_akhir']);
+        $tgl_akhir = $db->real_escape_string($_POST['tanggal_akhir']);
         $updates[] = "tanggal_akhir = '$tgl_akhir'";
     }
     
@@ -324,10 +377,15 @@ function update($db) {
     
     if (empty($updates)) {
         Response::error('Tidak ada data yang diupdate', 400);
+        return;
     }
     
-    $sql = "UPDATE promotions SET " . implode(', ', $updates) . " WHERE id_promo = '$id'";
-    $db->query($sql);
+    $sql = "UPDATE promotions SET " . implode(', ', $updates) . " WHERE id_promo = $id";
+    
+    if (!$db->query($sql)) {
+        Response::error('Gagal update promo: ' . $db->error, 500);
+        return;
+    }
     
     Response::success(['id_promo' => $id], 'Promo berhasil diupdate');
 }
@@ -336,22 +394,28 @@ function update($db) {
 // DELETE - Hapus promo
 // ============================================
 function delete($db) {
-    $id = $db->escape($_GET['id'] ?? '');
+    $id = intval($_GET['id'] ?? 0);
     
-    if (empty($id)) {
-        Response::error('ID promo tidak ditemukan', 400);
+    if ($id === 0) {
+        Response::error('ID promo tidak valid', 400);
+        return;
     }
     
     // Cek promo ada
-    $checkSql = "SELECT id_promo FROM promotions WHERE id_promo = '$id'";
+    $checkSql = "SELECT id_promo FROM promotions WHERE id_promo = $id";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
         Response::notFound('Promo tidak ditemukan');
+        return;
     }
     
     // Hard delete
-    $sql = "DELETE FROM promotions WHERE id_promo = '$id'";
-    $db->query($sql);
+    $sql = "DELETE FROM promotions WHERE id_promo = $id";
+    
+    if (!$db->query($sql)) {
+        Response::error('Gagal hapus promo: ' . $db->error, 500);
+        return;
+    }
     
     Response::success(['id_promo' => $id], 'Promo berhasil dihapus');
 }
