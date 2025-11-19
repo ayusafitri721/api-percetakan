@@ -1,8 +1,8 @@
 <?php
 /**
- * API Payments - CRUD Tabel payments
+ * API Payments - DENGAN PAYMENT VALIDATION
  * URL: http://localhost/api-percetakan/api/payments.php
- * FIXED: Status pembayaran sesuai request dari frontend
+ * FIXED: Terintegrasi dengan PaymentValidator.php
  */
 
 error_reporting(E_ALL);
@@ -10,6 +10,7 @@ ini_set('display_errors', 1);
 
 require_once '../config/database.php';
 require_once '../helpers/Response.php';
+require_once 'validators/PaymentValidator.php'; // ⬅️ TAMBAH INI
 
 // CORS
 header('Access-Control-Allow-Origin: *');
@@ -17,17 +18,14 @@ header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 header('Content-Type: application/json');
 
-// Handle preflight
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
-// Koneksi database
 $database = new Database();
 $db = $database->connect();
 
-// Get operation
 $op = $_GET['op'] ?? '';
 
 switch ($op) {
@@ -58,7 +56,7 @@ switch ($op) {
 }
 
 // ============================================
-// GET ALL - Ambil semua pembayaran
+// GET ALL
 // ============================================
 function getAll($db) {
     $sql = "SELECT p.*, o.kode_order, u.nama as nama_pelanggan,
@@ -99,7 +97,7 @@ function getAll($db) {
 }
 
 // ============================================
-// BY ORDER - Pembayaran per order
+// BY ORDER
 // ============================================
 function byOrder($db) {
     $id_order = $db->real_escape_string($_GET['id_order'] ?? '');
@@ -136,7 +134,7 @@ function byOrder($db) {
 }
 
 // ============================================
-// PENDING - Pembayaran menunggu konfirmasi
+// PENDING
 // ============================================
 function pendingPayments($db) {
     $sql = "SELECT p.*, o.kode_order, o.total_harga, u.nama as nama_pelanggan, u.no_telepon
@@ -172,7 +170,7 @@ function pendingPayments($db) {
 }
 
 // ============================================
-// CONFIRM - Konfirmasi pembayaran
+// CONFIRM
 // ============================================
 function confirmPayment($db) {
     $id = $db->real_escape_string($_POST['id_payment'] ?? '');
@@ -185,7 +183,6 @@ function confirmPayment($db) {
         return;
     }
     
-    // Cek payment ada
     $checkSql = "SELECT id_order FROM payments WHERE id_payment = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -195,7 +192,6 @@ function confirmPayment($db) {
     
     $id_order = $checkResult->fetch_assoc()['id_order'];
     
-    // Update payment
     $sql = "UPDATE payments 
             SET status_pembayaran = '$status',
                 id_admin_konfirmasi = '$id_admin',
@@ -205,7 +201,6 @@ function confirmPayment($db) {
     
     $db->query($sql);
     
-    // ✅ FIXED: Jika diterima, update status order ke "diproses" bukan "dibayar"
     if ($status === 'diterima') {
         $updateOrder = "UPDATE orders SET status_order = 'diproses' WHERE id_order = '$id_order'";
         $db->query($updateOrder);
@@ -218,12 +213,13 @@ function confirmPayment($db) {
 }
 
 // ============================================
-// CREATE - Tambah pembayaran (FIXED)
+// CREATE - DENGAN PAYMENT VALIDATION ✅
 // ============================================
 function create($db) {
     try {
-        error_log("=== CREATE PAYMENT CALLED ===");
-        error_log("POST data: " . print_r($_POST, true));
+        error_log("=== CREATE PAYMENT WITH VALIDATION ===");
+        error_log("POST: " . print_r($_POST, true));
+        error_log("FILES: " . print_r($_FILES, true));
         
         $id_order = $db->real_escape_string($_POST['id_order'] ?? '');
         $metode = $db->real_escape_string($_POST['metode_pembayaran'] ?? '');
@@ -231,42 +227,82 @@ function create($db) {
         $nomor_rekening = $db->real_escape_string($_POST['nomor_rekening'] ?? '');
         $nama_pemilik = $db->real_escape_string($_POST['nama_pemilik'] ?? '');
         $jumlah_bayar = floatval($_POST['jumlah_bayar'] ?? 0);
-        $bukti_bayar = $db->real_escape_string($_POST['bukti_bayar'] ?? '');
-        
-        // ✅ KEY FIX: Ambil status dari frontend, default 'pending'
         $status_pembayaran = $db->real_escape_string($_POST['status_pembayaran'] ?? 'pending');
         
         // Validasi
         if (empty($id_order) || empty($metode) || empty($jumlah_bayar)) {
-            error_log("ERROR: Validation failed - id_order: $id_order, metode: $metode, jumlah: $jumlah_bayar");
             Response::error('ID order, metode pembayaran, dan jumlah bayar wajib diisi', 400);
             return;
         }
         
-        // ✅ Validasi metode pembayaran sesuai enum
-        $valid_metode = ['transfer', 'qris', 'ewallet', 'cash', 'cod'];
-        if (!in_array($metode, $valid_metode)) {
-            error_log("ERROR: Invalid metode - $metode");
-            Response::error("Metode pembayaran tidak valid. Gunakan: " . implode(', ', $valid_metode), 400);
-            return;
-        }
-        
-        // Cek order ada
-        $checkOrder = "SELECT id_order, jenis_order FROM orders WHERE id_order = " . intval($id_order);
+        // Cek order
+        $checkOrder = "SELECT id_order, jenis_order, tanggal_order FROM orders WHERE id_order = " . intval($id_order);
         $resultOrder = $db->query($checkOrder);
         if ($resultOrder->num_rows === 0) {
-            error_log("ERROR: Order not found");
             Response::error('Order tidak ditemukan', 400);
             return;
         }
         
         $orderData = $resultOrder->fetch_assoc();
         $jenis_order = $orderData['jenis_order'];
+        $tanggal_order = $orderData['tanggal_order'];
         
-        // ✅ PENTING: Untuk offline/kasir, override status ke 'diterima' (sudah bayar tunai)
+        // Auto-approve untuk offline cash
         if ($jenis_order === 'offline' && $metode === 'cash') {
             $status_pembayaran = 'diterima';
-            error_log("OFFLINE CASH: Auto set to 'diterima'");
+            error_log("OFFLINE CASH: Auto-approved");
+        }
+        
+        $validation_result = null;
+        $bukti_bayar_url = null;
+        $auto_approved = false;
+        
+        // ⭐ VALIDASI BUKTI BAYAR (jika ada file)
+        if (isset($_FILES['bukti_bayar']) && $_FILES['bukti_bayar']['error'] === UPLOAD_ERR_OK) {
+            $file = $_FILES['bukti_bayar'];
+            
+            // PANGGIL PAYMENT VALIDATOR
+            $validator = new PaymentValidator();
+            $validation_result = $validator->validate($file, $jumlah_bayar, $tanggal_order);
+            
+            error_log("PAYMENT VALIDATION: " . print_r($validation_result, true));
+            
+            // ⭐ AUTO-DECIDE STATUS BERDASARKAN CONFIDENCE SCORE
+            if ($validation_result['is_valid']) {
+                $score = $validation_result['confidence_score'];
+                
+                if ($score >= 90) {
+                    $status_pembayaran = 'diterima';
+                    $auto_approved = true;
+                    error_log("AUTO-APPROVED: Score $score >= 90");
+                } elseif ($score >= 75) {
+                    $status_pembayaran = 'diterima';
+                    error_log("APPROVED: Score $score >= 75");
+                } elseif ($score >= 60) {
+                    $status_pembayaran = 'pending';
+                    error_log("MANUAL REVIEW: Score $score (60-74)");
+                } else {
+                    throw new Exception('Bukti pembayaran tidak valid: Score terlalu rendah (' . $score . ')');
+                }
+            } else {
+                throw new Exception('Bukti pembayaran tidak valid: ' . implode(', ', $validation_result['errors']));
+            }
+            
+            // Upload file
+            $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+            $uploadDir = '../uploads/payment_proofs/';
+            
+            if (!is_dir($uploadDir)) {
+                mkdir($uploadDir, 0755, true);
+            }
+            
+            $newName = "BUKTI_{$id_order}_" . time() . ".{$ext}";
+            $uploadPath = $uploadDir . $newName;
+            $bukti_bayar_url = "http://localhost/api-percetakan/uploads/payment_proofs/{$newName}";
+            
+            if (!move_uploaded_file($file['tmp_name'], $uploadPath)) {
+                throw new Exception('Gagal upload bukti bayar');
+            }
         }
         
         // Insert payment
@@ -280,42 +316,57 @@ function create($db) {
                     '$nomor_rekening',
                     '$nama_pemilik',
                     $jumlah_bayar,
-                    '$bukti_bayar',
+                    '$bukti_bayar_url',
                     '$status_pembayaran'
                 )";
         
-        error_log("SQL: $sql");
-        
         if (!$db->query($sql)) {
-            error_log("ERROR: Query failed - " . $db->error);
-            Response::error('Database error: ' . $db->error, 500);
-            return;
+            throw new Exception('Database error: ' . $db->error);
         }
         
         $insertId = $db->insert_id;
-        error_log("Payment created! ID: $insertId, Status: $status_pembayaran");
         
-        // ✅ FIXED: Update order status hanya untuk offline yang sudah lunas
-        if ($jenis_order === 'offline' && $status_pembayaran === 'diterima') {
+        // Update order status jika auto-approved
+        if ($status_pembayaran === 'diterima') {
             $updateOrderSql = "UPDATE orders SET status_order = 'diproses' WHERE id_order = " . intval($id_order);
             $db->query($updateOrderSql);
-            error_log("Order status updated to 'diproses' for offline payment");
         }
         
+        // ⭐ SAVE VALIDATION LOG
+        if ($validation_result) {
+            $logSql = "INSERT INTO validation_logs 
+                      (id_order, validation_type, status, message, details) 
+                      VALUES (?, 'payment', ?, ?, ?)";
+            
+            if ($stmt = $db->prepare($logSql)) {
+                $log_status = $validation_result['is_valid'] ? 'pass' : 'fail';
+                $log_message = $validation_result['recommendation'];
+                $log_details = json_encode($validation_result);
+                
+                $stmt->bind_param('isss', $id_order, $log_status, $log_message, $log_details);
+                $stmt->execute();
+                $stmt->close();
+            }
+        }
+        
+        // ⭐ RESPONSE DENGAN VALIDATION DATA
         Response::success([
             'id_payment' => $insertId,
             'id_order' => $id_order,
-            'status_pembayaran' => $status_pembayaran
+            'status_pembayaran' => $status_pembayaran,
+            'auto_approved' => $auto_approved,
+            'validation' => $validation_result, // ⬅️ KIRIM KE FRONTEND
+            'bukti_bayar' => $bukti_bayar_url
         ], 'Pembayaran berhasil dicatat');
         
     } catch (Exception $e) {
-        error_log("EXCEPTION: " . $e->getMessage());
+        error_log("PAYMENT ERROR: " . $e->getMessage());
         Response::error('Server error: ' . $e->getMessage(), 500);
     }
 }
 
 // ============================================
-// DETAIL - Detail pembayaran
+// DETAIL
 // ============================================
 function detail($db) {
     $id = $db->real_escape_string($_GET['id'] ?? '');
@@ -364,7 +415,7 @@ function detail($db) {
 }
 
 // ============================================
-// UPDATE - Update pembayaran
+// UPDATE
 // ============================================
 function update($db) {
     $id = $db->real_escape_string($_GET['id'] ?? '');
@@ -374,7 +425,6 @@ function update($db) {
         return;
     }
     
-    // Cek payment ada
     $checkSql = "SELECT id_payment FROM payments WHERE id_payment = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -382,7 +432,6 @@ function update($db) {
         return;
     }
     
-    // Build update query
     $updates = [];
     
     if (isset($_POST['bukti_bayar'])) {
@@ -407,7 +456,7 @@ function update($db) {
 }
 
 // ============================================
-// DELETE - Hapus pembayaran
+// DELETE
 // ============================================
 function delete($db) {
     $id = $db->real_escape_string($_GET['id'] ?? '');
@@ -417,7 +466,6 @@ function delete($db) {
         return;
     }
         
-    // Cek payment ada
     $checkSql = "SELECT id_payment FROM payments WHERE id_payment = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -425,7 +473,6 @@ function delete($db) {
         return;
     }
     
-    // Hard delete
     $sql = "DELETE FROM payments WHERE id_payment = '$id'";
     $db->query($sql);
     

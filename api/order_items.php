@@ -1,12 +1,14 @@
 <?php
 /**
- * API Order Items - CRUD Tabel order_items
- * URL: http://localhost/api-percetakan/order_items.php
+ * API Order Items - DENGAN FILE VALIDATION
+ * URL: http://localhost/api-percetakan/api/order_items.php
+ * FIXED: Terintegrasi dengan FileValidator.php
  */
 
 error_reporting(0);
 require_once '../config/database.php';
 require_once '../helpers/Response.php';
+require_once 'validators/FileValidator.php'; // ⬅️ TAMBAH INI
 
 // CORS
 header('Access-Control-Allow-Origin: *');
@@ -42,7 +44,7 @@ switch ($op) {
 }
 
 // ============================================
-// GET ALL - Ambil semua item
+// GET ALL
 // ============================================
 function getAll($db) {
     $sql = "SELECT oi.*, o.kode_order, p.nama_product, p.gambar_preview
@@ -77,7 +79,7 @@ function getAll($db) {
 }
 
 // ============================================
-// BY ORDER - Item per order
+// BY ORDER
 // ============================================
 function byOrder($db) {
     $id_order = $db->escape($_GET['id_order'] ?? '');
@@ -116,10 +118,9 @@ function byOrder($db) {
 }
 
 // ============================================
-// CREATE - Tambah item ke order
+// CREATE - DENGAN FILE VALIDATION ✅
 // ============================================
 function create($db) {
-    // Debug: Lihat semua input
     error_log("POST: " . print_r($_POST, true));
     error_log("FILES: " . print_r($_FILES, true));
 
@@ -173,21 +174,33 @@ function create($db) {
 
         $design_file_id = null;
         $file_url = null;
+        $validation_result = null;
 
-        // 2. Upload file (jika ada)
+        // 2. VALIDASI & UPLOAD FILE ✅
         if (isset($_FILES['file_desain']) && $_FILES['file_desain']['error'] === UPLOAD_ERR_OK) {
             $file = $_FILES['file_desain'];
+            
+            // ⭐ PANGGIL FILE VALIDATOR
+            $validator = new FileValidator();
+            $validation_result = $validator->validate($file);
+            
+            error_log("VALIDATION RESULT: " . print_r($validation_result, true));
+            
+            // ⭐ CEK CONFIDENCE SCORE
+            if (!$validation_result['is_valid']) {
+                // ROLLBACK jika file tidak valid
+                throw new Exception('File tidak valid: ' . implode(', ', $validation_result['errors']));
+            }
+            
+            // Warning jika confidence rendah (60-74)
+            if ($validation_result['confidence_score'] < 75) {
+                error_log("WARNING: Low confidence score - " . $validation_result['confidence_score']);
+            }
+            
+            // File valid, lanjut upload
             $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-            $allowed = ['jpg', 'jpeg', 'png', 'pdf'];
-
-            if (!in_array($ext, $allowed)) {
-                throw new Exception('Format file harus JPG, PNG, atau PDF');
-            }
-            if ($file['size'] > 10 * 1024 * 1024) {
-                throw new Exception('Ukuran file maksimal 10MB');
-            }
-
             $uploadDir = '../uploads/design_files/';
+            
             if (!is_dir($uploadDir)) {
                 if (!mkdir($uploadDir, 0755, true)) {
                     throw new Exception('Gagal buat folder upload');
@@ -202,18 +215,35 @@ function create($db) {
                 throw new Exception('Gagal simpan file ke server');
             }
 
-            // Simpan ke design_files
+            // Simpan ke design_files dengan validation status
+            $status_validasi = $validation_result['confidence_score'] >= 90 ? 'diterima' : 'pending';
+            
             $sqlFile = "INSERT INTO design_files 
                         (id_order, nama_file, file_url, ukuran_file, tipe_file, status_validasi) 
-                        VALUES (?, ?, ?, ?, ?, 'pending')";
+                        VALUES (?, ?, ?, ?, ?, ?)";
             $stmtFile = $db->prepare($sqlFile);
             if (!$stmtFile) throw new Exception("Prepare design_files failed: " . $db->error);
 
-            $stmtFile->bind_param('issis', $id_order, $file['name'], $file_url, $file['size'], $ext);
+            $stmtFile->bind_param('ississ', $id_order, $file['name'], $file_url, $file['size'], $ext, $status_validasi);
             if (!$stmtFile->execute()) throw new Exception("Execute design_files failed: " . $stmtFile->error);
 
             $design_file_id = $stmtFile->insert_id;
             $stmtFile->close();
+            
+            // ⭐ SAVE VALIDATION LOG (opsional, jika ada tabel validation_logs)
+            $logSql = "INSERT INTO validation_logs 
+                      (id_order, validation_type, status, message, details) 
+                      VALUES (?, 'file', ?, ?, ?)";
+            
+            if ($stmt = $db->prepare($logSql)) {
+                $log_status = $validation_result['is_valid'] ? 'pass' : 'fail';
+                $log_message = $validation_result['recommendation'];
+                $log_details = json_encode($validation_result);
+                
+                $stmt->bind_param('isss', $id_order, $log_status, $log_message, $log_details);
+                $stmt->execute();
+                $stmt->close();
+            }
         }
 
         $db->commit();
@@ -222,10 +252,12 @@ function create($db) {
         // Update total order
         updateOrderTotal($db, $id_order);
 
+        // ⭐ RESPONSE DENGAN VALIDATION DATA
         Response::created([
             'id_item' => $id_item,
             'id_design_file' => $design_file_id,
             'file_url' => $file_url,
+            'validation' => $validation_result, // ⬅️ KIRIM KE FRONTEND
             'message' => 'Item berhasil disimpan'
         ]);
 
@@ -238,7 +270,7 @@ function create($db) {
 }
 
 // ============================================
-// DETAIL - Detail item
+// DETAIL
 // ============================================
 function detail($db) {
     $id = $db->escape($_GET['id'] ?? '');
@@ -279,7 +311,7 @@ function detail($db) {
 }
 
 // ============================================
-// UPDATE - Update item
+// UPDATE
 // ============================================
 function update($db) {
     $id = $db->escape($_GET['id'] ?? '');
@@ -288,7 +320,6 @@ function update($db) {
         Response::error('ID item tidak ditemukan', 400);
     }
     
-    // Cek item ada
     $checkSql = "SELECT id_order FROM order_items WHERE id_item = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -297,7 +328,6 @@ function update($db) {
     
     $id_order = $checkResult->fetch_assoc()['id_order'];
     
-    // Build update query
     $updates = [];
     $recalculate = false;
     
@@ -323,7 +353,6 @@ function update($db) {
         $updates[] = "keterangan = '$keterangan'";
     }
     
-    // Recalculate subtotal jika jumlah atau harga berubah
     if ($recalculate) {
         $getSql = "SELECT jumlah, harga_satuan FROM order_items WHERE id_item = '$id'";
         $getResult = $db->query($getSql);
@@ -343,14 +372,13 @@ function update($db) {
     $sql = "UPDATE order_items SET " . implode(', ', $updates) . " WHERE id_item = '$id'";
     $db->query($sql);
     
-    // Update total order
     updateOrderTotal($db, $id_order);
     
     Response::success(['id_item' => $id], 'Item berhasil diupdate');
 }
 
 // ============================================
-// DELETE - Hapus item
+// DELETE
 // ============================================
 function delete($db) {
     $id = $db->escape($_GET['id'] ?? '');
@@ -359,7 +387,6 @@ function delete($db) {
         Response::error('ID item tidak ditemukan', 400);
     }
     
-    // Cek item ada
     $checkSql = "SELECT id_order FROM order_items WHERE id_item = '$id'";
     $checkResult = $db->query($checkSql);
     if ($checkResult->num_rows === 0) {
@@ -368,11 +395,9 @@ function delete($db) {
     
     $id_order = $checkResult->fetch_assoc()['id_order'];
     
-    // Hard delete
     $sql = "DELETE FROM order_items WHERE id_item = '$id'";
     $db->query($sql);
     
-    // Update total order
     updateOrderTotal($db, $id_order);
     
     Response::success(['id_item' => $id], 'Item berhasil dihapus');
@@ -382,12 +407,10 @@ function delete($db) {
 // HELPER - Update total order
 // ============================================
 function updateOrderTotal($db, $id_order) {
-    // Hitung total dari semua items
     $totalSql = "SELECT SUM(subtotal) as total FROM order_items WHERE id_order = '$id_order'";
     $totalResult = $db->query($totalSql);
     $subtotal = $totalResult->fetch_assoc()['total'] ?? 0;
     
-    // Get diskon dan ongkir
     $orderSql = "SELECT diskon, ongkir FROM orders WHERE id_order = '$id_order'";
     $orderResult = $db->query($orderSql);
     $order = $orderResult->fetch_assoc();
@@ -395,10 +418,8 @@ function updateOrderTotal($db, $id_order) {
     $diskon = $order['diskon'] ?? 0;
     $ongkir = $order['ongkir'] ?? 0;
     
-    // Hitung total akhir
     $total_harga = $subtotal - $diskon + $ongkir;
     
-    // Update order
     $updateSql = "UPDATE orders SET subtotal = '$subtotal', total_harga = '$total_harga' WHERE id_order = '$id_order'";
     $db->query($updateSql);
 }
