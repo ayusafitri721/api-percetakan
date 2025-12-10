@@ -1,8 +1,7 @@
 <?php
 /**
- * API Orders - COMPLETE WITH COD & TRACKING SUPPORT
- * Status Flow: pending -> validasi -> proses -> siap -> dikirim -> selesai
- * COD Payment: Auto update to 'lunas' when status = 'selesai'
+ * API Orders - FIXED: Consistent with orderHelpers.ts
+ * Status Flow: pending -> validasi -> diproses -> siap -> dikirim -> selesai
  */
 
 error_reporting(E_ALL);
@@ -62,18 +61,18 @@ switch ($op) {
 }
 
 // ============================================
-// HELPER: Validasi Status Order - More flexible
+// HELPER: Validasi Status Order
 // ============================================
 function validateStatusOrder($status) {
     if (empty($status)) {
         return false;
     }
-    $validStatuses = ['pending', 'validasi', 'proses', 'siap', 'dikirim', 'selesai', 'dibatalkan', 'dibayar', 'diproses', 'cetak'];
+    $validStatuses = ['pending', 'validasi', 'diproses', 'siap', 'dikirim', 'selesai', 'dibatalkan'];
     return in_array(strtolower($status), $validStatuses);
 }
 
 // ============================================
-// GET ALL ORDERS - FIXED: Without id_kurir
+// GET ALL ORDERS
 // ============================================
 function getAll($db) {
     error_log("=== GET ALL ORDERS ===");
@@ -131,7 +130,6 @@ function getAll($db) {
     
     error_log("✅ Total orders fetched: " . count($data));
     
-    // CONSISTENT RESPONSE STRUCTURE
     Response::success([
         'total' => count($data),
         'orders' => $data
@@ -139,7 +137,7 @@ function getAll($db) {
 }
 
 // ============================================
-// BY USER - FIXED: Without id_kurir
+// BY USER
 // ============================================
 function byUser($db) {
     $id_user = $_GET['id_user'] ?? '';
@@ -183,7 +181,7 @@ function byUser($db) {
 }
 
 // ============================================
-// BY STATUS - FIXED: Without id_kurir
+// BY STATUS
 // ============================================
 function byStatus($db) {
     $status = $_GET['status'] ?? '';
@@ -233,7 +231,7 @@ function byStatus($db) {
 }
 
 // ============================================
-// UPDATE STATUS - WITH COD AUTO PAYMENT UPDATE
+// UPDATE STATUS
 // ============================================
 function updateStatus($db) {
     error_log("=== UPDATE STATUS CALLED ===");
@@ -249,15 +247,13 @@ function updateStatus($db) {
     $id = intval($id);
     $status = $db->real_escape_string($status);
     
-    // Validasi status
     if (!validateStatusOrder($status)) {
-        Response::error('Status order tidak valid. Gunakan: pending, validasi, proses, siap, dikirim, selesai, dibatalkan', 400);
+        Response::error('Status order tidak valid', 400);
         return;
     }
     
     error_log("Updating order $id to status: $status");
     
-    // Cek order exists dan ambil info payment
     $checkSql = "SELECT o.id_order, p.id_payment, p.metode_pembayaran, p.status_pembayaran
                  FROM orders o
                  LEFT JOIN payments p ON o.id_order = p.id_order
@@ -272,17 +268,11 @@ function updateStatus($db) {
     $orderData = $checkResult->fetch_assoc();
     $isCOD = ($orderData['metode_pembayaran'] === 'cod');
     
-    error_log("Order found - COD: " . ($isCOD ? 'YES' : 'NO'));
-    error_log("Current payment status: " . $orderData['status_pembayaran']);
-    
-    // Start transaction
     $db->begin_transaction();
     
     try {
-        // 1. Update order status
         $updateOrderSql = "UPDATE orders SET status_order = '$status'";
         
-        // Set tanggal_selesai untuk status selesai
         if ($status === 'selesai') {
             $updateOrderSql .= ", tanggal_selesai = NOW()";
         }
@@ -295,7 +285,6 @@ function updateStatus($db) {
         
         error_log("✅ Order status updated to: $status");
         
-        // 2. Auto update payment status untuk COD ketika selesai
         if ($isCOD && $status === 'selesai' && $orderData['status_pembayaran'] !== 'lunas') {
             error_log("💰 Auto updating COD payment to lunas...");
             
@@ -311,7 +300,6 @@ function updateStatus($db) {
             error_log("✅ Payment status updated to: lunas");
         }
         
-        // Commit transaction
         $db->commit();
         
         Response::success([
@@ -328,7 +316,7 @@ function updateStatus($db) {
 }
 
 // ============================================
-// DETAIL ORDER - FIXED: Without id_kurir initially
+// DETAIL ORDER
 // ============================================
 function detail($db) {
     $id = $_GET['id'] ?? '';
@@ -364,7 +352,6 @@ function detail($db) {
     
     $row = $result->fetch_assoc();
     
-    // Get order items
     $itemsSql = "SELECT oi.id_item, oi.id_product, oi.ukuran, oi.jumlah, 
                  oi.harga_satuan, oi.subtotal, oi.keterangan,
                  p.nama_product, p.gambar_preview
@@ -390,21 +377,18 @@ function detail($db) {
         }
     }
     
-    // Build tracking history
     $trackingHistory = [];
-    
-    // Status tracking berdasarkan status order
     $statusMap = [
         'pending' => ['status' => 'pending', 'label' => 'Pesanan Dibuat', 'icon' => '📝'],
         'validasi' => ['status' => 'validasi', 'label' => 'Menunggu Validasi', 'icon' => '⏳'],
-        'proses' => ['status' => 'proses', 'label' => 'Sedang Diproses', 'icon' => '🔨'],
+        'diproses' => ['status' => 'diproses', 'label' => 'Sedang Diproses', 'icon' => '🔨'],
         'siap' => ['status' => 'siap', 'label' => 'Siap Dikirim', 'icon' => '📦'],
         'dikirim' => ['status' => 'dikirim', 'label' => 'Dalam Pengiriman', 'icon' => '🚚'],
         'selesai' => ['status' => 'selesai', 'label' => 'Pesanan Selesai', 'icon' => '✅']
     ];
     
     $currentStatus = $row['status_order'];
-    $statusOrder = ['pending', 'validasi', 'proses', 'siap', 'dikirim', 'selesai'];
+    $statusOrder = ['pending', 'validasi', 'diproses', 'siap', 'dikirim', 'selesai'];
     $currentIndex = array_search($currentStatus, $statusOrder);
     
     foreach ($statusOrder as $index => $status) {
@@ -413,7 +397,7 @@ function detail($db) {
                 'status' => $status,
                 'label' => $statusMap[$status]['label'],
                 'icon' => $statusMap[$status]['icon'],
-                'timestamp' => $row['tanggal_order'], // Simplified - use order date
+                'timestamp' => $row['tanggal_order'],
                 'completed' => true
             ];
         }
@@ -428,8 +412,6 @@ function detail($db) {
         'telepon_customer' => $row['telepon_customer'],
         'alamat_pengiriman' => $row['alamat_pengiriman'],
         'nama_kasir' => $row['nama_kasir'],
-        'nama_kurir' => null, // Will be added later when column exists
-        'telepon_kurir' => null, // Will be added later when column exists
         'tanggal_order' => $row['tanggal_order'],
         'jenis_order' => $row['jenis_order'],
         'kecepatan_pengerjaan' => $row['kecepatan_pengerjaan'],
@@ -452,7 +434,7 @@ function detail($db) {
 }
 
 // ============================================
-// CREATE ORDER - FIXED: More tolerant validation
+// CREATE ORDER
 // ============================================
 function create($db) {
     try {
@@ -471,33 +453,30 @@ function create($db) {
         $catatan_internal = $_POST['catatan_internal'] ?? '';
         $status_order = $_POST['status_order'] ?? 'pending';
         
-        error_log("Parsed data - id_user: $id_user, jenis_order: $jenis_order, status: $status_order");
+        error_log("Parsed data - id_user: $id_user, status: $status_order");
         
-        // Validasi status - lebih fleksibel
+        // ✅ Validasi status
         if (!empty($status_order) && !validateStatusOrder($status_order)) {
             error_log("WARNING: Invalid status '$status_order', using 'pending'");
-            $status_order = 'pending'; // Default ke pending jika invalid
+            $status_order = 'pending';
         }
         
-        // Validasi user - HANYA INI YANG REQUIRED
         if (empty($id_user) || $id_user === '0') {
-            error_log("ERROR: ID user kosong atau invalid");
+            error_log("ERROR: ID user kosong");
             Response::error('ID user wajib diisi', 400);
             return;
         }
         
-        // Cek user exists - optional, tapi recommended
         $checkUser = "SELECT id_user FROM users WHERE id_user = " . intval($id_user);
         $resultUser = $db->query($checkUser);
         if (!$resultUser || $resultUser->num_rows === 0) {
-            error_log("ERROR: User ID $id_user tidak ditemukan di database");
+            error_log("ERROR: User ID $id_user tidak ditemukan");
             Response::error('User tidak ditemukan', 400);
             return;
         }
         
-        error_log("✅ User validated, generating order code...");
+        error_log("✅ User validated");
         
-        // Generate kode order
         $tanggal_str = date('YmdHis');
         $countSql = "SELECT COUNT(*) as total FROM orders WHERE DATE(tanggal_order) = CURDATE()";
         $countResult = $db->query($countSql);
@@ -506,14 +485,12 @@ function create($db) {
         
         error_log("Generated kode_order: $kode_order");
         
-        // Prepare values - pastikan tidak ada string kosong untuk numeric fields
         $id_kasir_value = (!empty($id_kasir) && $id_kasir !== '0') ? intval($id_kasir) : 'NULL';
         $subtotal_value = !empty($subtotal) ? floatval($subtotal) : 0;
         $diskon_value = !empty($diskon) ? floatval($diskon) : 0;
         $ongkir_value = !empty($ongkir) ? floatval($ongkir) : 0;
         $total_harga_value = !empty($total_harga) ? floatval($total_harga) : 0;
         
-        // Escape strings
         $jenis_order_escaped = $db->real_escape_string($jenis_order);
         $kecepatan_escaped = $db->real_escape_string($kecepatan);
         $catatan_escaped = $db->real_escape_string($catatan_pelanggan);
@@ -562,7 +539,7 @@ function create($db) {
 }
 
 // ============================================
-// UPDATE ORDER
+// UPDATE, DELETE, STATISTICS, SALES REPORT
 // ============================================
 function update($db) {
     $id = $_GET['id'] ?? '';
@@ -596,11 +573,6 @@ function update($db) {
         }
     }
     
-    if (isset($_POST['id_kurir'])) {
-        $id_kurir = intval($_POST['id_kurir']);
-        $updates[] = "id_kurir = $id_kurir";
-    }
-    
     if (isset($_POST['kecepatan_pengerjaan'])) {
         $updates[] = "kecepatan_pengerjaan = '" . $db->real_escape_string($_POST['kecepatan_pengerjaan']) . "'";
     }
@@ -624,9 +596,6 @@ function update($db) {
     Response::success(['id_order' => $id], 'Order berhasil diupdate');
 }
 
-// ============================================
-// DELETE ORDER (soft delete)
-// ============================================
 function delete($db) {
     $id = $_GET['id'] ?? '';
     
@@ -650,9 +619,6 @@ function delete($db) {
     Response::success(['id_order' => $id], 'Order berhasil dibatalkan');
 }
 
-// ============================================
-// STATISTICS
-// ============================================
 function statistics($db) {
     $startDate = $_GET['start_date'] ?? '';
     $endDate = $_GET['end_date'] ?? '';
@@ -681,9 +647,6 @@ function statistics($db) {
     ]);
 }
 
-// ============================================
-// SALES REPORT
-// ============================================
 function salesReport($db) {
     $startDate = $_GET['start_date'] ?? '';
     $endDate = $_GET['end_date'] ?? '';
